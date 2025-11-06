@@ -23,6 +23,7 @@ from modules.api_clients import (
 )
 from modules.ui_components import analyze_single_reference
 from modules.parsers import extract_title, extract_doi, detect_reference_style
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ========== 頁面設定 ==========
 st.set_page_config(
@@ -218,91 +219,125 @@ with tab2:
         st.warning("⚠️ 請先在「上傳文件」頁面處理文件")
     else:
         st.info(f"共有 {len(st.session_state.references)} 條參考文獻待檢查")
-        
-        # 開始檢查按鈕
+
+        # === 單筆檢查函式 ===
+        def check_single_reference(idx, ref_text, check_opts, api_keys, similarity_threshold):
+            result = {
+                "index": idx,
+                "text": ref_text,
+                "title": None,
+                "doi": None,
+                "style": None,
+                "sources": {}
+            }
+
+            # 基本欄位擷取
+            result["style"] = detect_reference_style(ref_text)
+            result["title"] = extract_title(ref_text, result["style"])
+            result["doi"] = extract_doi(ref_text)
+
+            # Crossref (DOI)
+            if result["doi"] and check_opts["crossref"]:
+                title, url = search_crossref_by_doi(result["doi"])
+                if url:
+                    result["sources"]["Crossref"] = {"status": "✅ 找到", "url": url}
+
+            # 其餘以標題搜尋
+            if result["title"]:
+                if check_opts["scopus"] and api_keys.get("scopus"):
+                    scopus_url = search_scopus_by_title(result["title"], api_keys["scopus"])
+                    if scopus_url:
+                        result["sources"]["Scopus"] = {"status": "✅ 找到", "url": scopus_url}
+
+                if check_opts["scholar"] and api_keys.get("serpapi"):
+                    scholar_url, scholar_status = search_scholar_by_title(
+                        result["title"], api_keys["serpapi"], similarity_threshold
+                    )
+                    status_map = {
+                        "match": "✅ 完全匹配",
+                        "similar": "⚠️ 相似匹配",
+                        "no_result": "❌ 未找到",
+                        "error": "❌ 查詢錯誤"
+                    }
+                    result["sources"]["Google Scholar"] = {
+                        "status": status_map.get(scholar_status, "❌ 未知"),
+                        "url": scholar_url
+                    }
+
+                if check_opts["s2"]:
+                    s2_url = search_s2_by_title(result["title"])
+                    if s2_url:
+                        result["sources"]["Semantic Scholar"] = {"status": "✅ 找到", "url": s2_url}
+
+                if check_opts["openalex"]:
+                    oa_url = search_openalex_by_title(result["title"])
+                    if oa_url:
+                        result["sources"]["OpenAlex"] = {"status": "✅ 找到", "url": oa_url}
+
+            return result
+
+        # === 開始檢查按鈕 ===
         if st.button("🔍 開始檢查所有引用", type="primary", use_container_width=True):
             st.session_state.results = []
             st.session_state.processing = True
-            
-            # 進度條
+
             progress_bar = st.progress(0)
             status_text = st.empty()
-            
+
             # 取得 API 金鑰
             try:
                 scopus_key = get_scopus_key() if check_scopus else None
                 serpapi_key = get_serpapi_key() if check_scholar else None
-            except:
-                st.error("❌ API 金鑰設定錯誤，請檢查設定")
+            except Exception as e:
+                st.error(f"❌ API 金鑰設定錯誤：{e}")
                 st.stop()
-            
-            # 逐條檢查
-            for idx, ref_text in enumerate(st.session_state.references, 1):
-                status_text.text(f"正在檢查第 {idx}/{len(st.session_state.references)} 條引用...")
-                
-                result = {
-                    "index": idx,
-                    "text": ref_text,
-                    "title": None,
-                    "doi": None,
-                    "style": None,
-                    "sources": {}
+
+            api_keys = {"scopus": scopus_key, "serpapi": serpapi_key}
+            check_opts = {
+                "crossref": check_crossref,
+                "scopus": check_scopus,
+                "scholar": check_scholar,
+                "s2": check_s2,
+                "openalex": check_openalex,
+            }
+
+            refs = st.session_state.references
+            total = len(refs)
+            results = []
+
+            # 使用 ThreadPoolExecutor 平行處理
+            max_workers = min(10, total)
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        check_single_reference, idx + 1, ref, check_opts, api_keys, similarity_threshold
+                    ): idx
+                    for idx, ref in enumerate(refs)
                 }
-                
-                # 提取基本資訊
-                result["style"] = detect_reference_style(ref_text)
-                result["title"] = extract_title(ref_text, result["style"])
-                result["doi"] = extract_doi(ref_text)
-                
-                # 檢查各個來源
-                if result["doi"] and check_crossref:
-                    title, url = search_crossref_by_doi(result["doi"])
-                    if url:
-                        result["sources"]["Crossref"] = {"status": "✅ 找到", "url": url}
-                
-                if result["title"]:
-                    if check_scopus and scopus_key:
-                        scopus_url = search_scopus_by_title(result["title"], scopus_key)
-                        if scopus_url:
-                            result["sources"]["Scopus"] = {"status": "✅ 找到", "url": scopus_url}
-                    
-                    if check_scholar and serpapi_key:
-                        scholar_url, scholar_status = search_scholar_by_title(
-                            result["title"], serpapi_key, similarity_threshold
-                        )
-                        status_map = {
-                            "match": "✅ 完全匹配",
-                            "similar": "⚠️ 相似匹配",
-                            "no_result": "❌ 未找到",
-                            "error": "❌ 查詢錯誤"
-                        }
-                        result["sources"]["Google Scholar"] = {
-                            "status": status_map.get(scholar_status, "❌ 未知"),
-                            "url": scholar_url
-                        }
-                    
-                    if check_s2:
-                        s2_url = search_s2_by_title(result["title"])
-                        if s2_url:
-                            result["sources"]["Semantic Scholar"] = {"status": "✅ 找到", "url": s2_url}
-                    
-                    if check_openalex:
-                        oa_url = search_openalex_by_title(result["title"])
-                        if oa_url:
-                            result["sources"]["OpenAlex"] = {"status": "✅ 找到", "url": oa_url}
-                
-                st.session_state.results.append(result)
-                progress_bar.progress(idx / len(st.session_state.references))
-            
-            status_text.success("✅ 檢查完成！")
+
+                for i, future in enumerate(as_completed(futures), 1):
+                    try:
+                        result = future.result()
+                        results.append(result)
+                    except Exception as e:
+                        st.error(f"❌ 第 {i} 條引用檢查失敗：{e}")
+                        continue
+
+                    progress_bar.progress(i / total)
+                    status_text.text(f"完成 {i}/{total} 條引用")
+
+            # 檢查完成
+            st.session_state.results = sorted(results, key=lambda r: r["index"])
+            status_text.success("✅ 所有引用檢查完成！")
             st.session_state.processing = False
             time.sleep(1)
             st.rerun()
-        
-        # 顯示結果
+
+        # === 顯示結果 ===
         if st.session_state.results:
             st.divider()
-            
+
             # 篩選器
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -310,12 +345,11 @@ with tab2:
                     "篩選結果",
                     ["全部", "已驗證", "未驗證", "部分驗證"]
                 )
-            
-            # 顯示每條結果
+
             for result in st.session_state.results:
                 verified_count = sum(1 for s in result["sources"].values() if "✅" in s["status"])
                 total_checks = len(result["sources"])
-                
+
                 # 根據篩選器判斷是否顯示
                 if filter_option == "已驗證" and verified_count == 0:
                     continue
@@ -323,10 +357,10 @@ with tab2:
                     continue
                 elif filter_option == "部分驗證" and (verified_count == 0 or verified_count == total_checks):
                     continue
-                
+
                 with st.expander(f"📄 引用 {result['index']}", expanded=False):
                     st.markdown(f'<div class="ref-item">{result["text"]}</div>', unsafe_allow_html=True)
-                    
+
                     col1, col2 = st.columns(2)
                     with col1:
                         st.write(f"**📰 標題**: {result['title'] or '❌ 無法擷取'}")
@@ -334,7 +368,7 @@ with tab2:
                     with col2:
                         st.write(f"**🔍 DOI**: {result['doi'] or '❌ 無'}")
                         st.write(f"**✅ 驗證數**: {verified_count}/{total_checks}")
-                    
+
                     if result["sources"]:
                         st.write("**🔗 資料來源檢查結果**:")
                         for source, info in result["sources"].items():
@@ -344,6 +378,7 @@ with tab2:
                                 f'[🔗 連結]({info["url"]})',
                                 unsafe_allow_html=True
                             )
+
 
 # ========== Tab 3: 統計報告 ==========
 with tab3:
