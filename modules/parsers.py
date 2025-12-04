@@ -1,94 +1,119 @@
-# modules/parsers.py (Cleaned Version)
+# modules/parsers.py
+
 import re
 import unicodedata
 import subprocess
 import json
-import streamlit as st 
-# 僅保留用於標題相似度比對的 difflib，但因為它在 api_clients.py 中也需要，
-# 我們在這裡可以移除其導入，以防循環依賴。
+import streamlit as st
 
 # ==============================================================================
-#                 [ ✨ NEW: ANYSTYLE CLI INTEGRATION ✨ ]
+#                 [ AnyStyle 解析功能 (Docker 版 - 修正路徑) ]
 # ==============================================================================
-ABSOLUTE_ANYSTYLE_PATH = 'C:\Ruby34\bin\anystyle.bat'
 def parse_references_with_anystyle(raw_text_for_anystyle):
     """
-    調用 AnyStyle CLI 來解析非結構化的參考文獻文本。
-    
-    Args:
-        raw_text_for_anystyle (str): 包含所有參考文獻的單一大段文本。
-        
-    Returns:
-        tuple: (raw_ref_texts_list, structured_refs_list) 
-               - 原始文本列表供顯示
-               - 結構化字典列表供 API 調用 (包含 'text', 'title', 'doi', 'type' 等)
+    呼叫 Docker 容器內的 AnyStyle CLI 來解析參考文獻。
     """
+    if not raw_text_for_anystyle or not raw_text_for_anystyle.strip():
+        return [], []
+
     try:
-        command = [ABSOLUTE_ANYSTYLE_PATH, 'parse', '--format', 'json']
+        # 🐳 修正重點：將 '-' 改為 '/dev/stdin'
+        # AnyStyle 不支援 '-' 符號，但支援 Linux 的標準輸入裝置檔案路徑
+        command = ['docker', 'run', '--rm', '-i', 'anystyle-local', '--stdout', '-f', 'json', 'parse', '/dev/stdin']
         
+        # 呼叫 Docker
         process = subprocess.run(
             command,
-            input=raw_text_for_anystyle.encode('utf-8'),
+            input=raw_text_for_anystyle, # 透過這裡傳送文字給 /dev/stdin
             capture_output=True,
             text=True, 
             encoding='utf-8', 
             check=True
         )
         
-        structured_refs = json.loads(process.stdout)
+        # --- 解析 JSON 輸出 ---
+        try:
+            # 有時候 Docker 會在 stdout 混雜一些非 JSON 的 Log，這裡做個簡單擷取
+            json_str = process.stdout.strip()
+            # 如果開頭不是 [，嘗試用正則表達式抓取 JSON 陣列
+            if not json_str.startswith('['):
+                match = re.search(r'\[.*\]', json_str, re.DOTALL)
+                if match:
+                    json_str = match.group(0)
+            
+            raw_data = json.loads(json_str)
+            
+        except json.JSONDecodeError:
+            st.error("❌ AnyStyle 回傳的不是有效的 JSON。")
+            st.code(process.stdout) # 顯示原始輸出以便除錯
+            return [], []
         
-        raw_texts = [ref.get('text', '') for ref in structured_refs]
+        # --- 資料清洗與攤平 ---
+        structured_refs = []
+        raw_texts = []
+
+        for item in raw_data:
+            cleaned_item = {}
+            for key, value in item.items():
+                if isinstance(value, list):
+                    # 作者欄位處理
+                    if key == 'author':
+                        authors_list = []
+                        for auth in value:
+                            if isinstance(auth, dict):
+                                parts = [p for p in [auth.get('given'), auth.get('family')] if p]
+                                authors_list.append(" ".join(parts))
+                            else:
+                                authors_list.append(str(auth))
+                        cleaned_item['authors'] = ", ".join(authors_list)
+                    # 其他欄位直接合併
+                    else:
+                        cleaned_item[key] = " ".join([str(v) for v in value])
+                else:
+                    cleaned_item[key] = value
+
+            # 產生 text 欄位
+            if 'text' not in cleaned_item:
+                fallback_parts = []
+                if 'authors' in cleaned_item: fallback_parts.append(cleaned_item['authors'])
+                if 'date' in cleaned_item: fallback_parts.append(f"({cleaned_item['date']})")
+                if 'title' in cleaned_item: fallback_parts.append(cleaned_item['title'])
+                cleaned_item['text'] = ". ".join(fallback_parts) if fallback_parts else "Parsed Reference"
+
+            structured_refs.append(cleaned_item)
+            raw_texts.append(cleaned_item.get('text', ''))
         
         return raw_texts, structured_refs
         
     except subprocess.CalledProcessError as e:
-        st.error("❌ AnyStyle CLI 執行失敗。請確認 AnyStyle 已安裝。")
-        st.code(f"錯誤訊息:\n{e.stderr}", language='bash')
+        st.error("❌ Docker 執行失敗。")
+        # 這裡會顯示具體的錯誤訊息，例如路徑錯誤等
+        st.error(f"錯誤訊息 (Stderr): {e.stderr}")
         return [], []
     except FileNotFoundError:
-        st.error("❌ 找不到 AnyStyle CLI。請確認 'anystyle' 在 PATH 中。")
+        st.error("❌ 找不到 'docker' 指令。請確認 Docker Desktop 已啟動。")
         return [], []
-    except json.JSONDecodeError:
-        st.error("❌ AnyStyle 輸出解析錯誤。請檢查 CLI 原始輸出是否為有效 JSON。")
+    except Exception as e:
+        st.error(f"❌ 發生錯誤: {e}")
         return [], []
 
 # ==============================================================================
-#                 [ 輔助函式: 標題清洗 (供 API Clients 使用) ]
+#                 [ 標題清洗輔助函式 (保持不變) ]
 # ==============================================================================
 
 def clean_title(text):
-    """標準標題清洗：移除符號、標準化、轉小寫 (供 API 搜尋時的字符串匹配)"""
+    if not text: return ""
+    text = str(text)
     dash_variants = ["-", "–", "—", "−", "‑", "‐"]
-    for d in dash_variants:
-        text = text.replace(d, "")
-
+    for d in dash_variants: text = text.replace(d, "")
     text = unicodedata.normalize('NFKC', text)
-
-    cleaned = []
-    for ch in text:
-        if unicodedata.category(ch)[0] in ("L", "N", "Z"): # L=Letter, N=Number, Z=Space
-            cleaned.append(ch.lower())
-
+    cleaned = [ch.lower() for ch in text if unicodedata.category(ch)[0] in ("L", "N", "Z")]
     return re.sub(r'\s+', ' ', ''.join(cleaned)).strip()
 
 def clean_title_for_remedial(text):
-    """給補救查詢用的清洗：去掉單獨數字、標點、全形轉半形等"""
+    if not text: return ""
+    text = str(text)
     text = unicodedata.normalize('NFKC', text)
-
-    dash_variants = ["-", "–", "—", "−", "‑", "‐"]
-    for d in dash_variants:
-        text = text.replace(d, "")
-
-    text = re.sub(r'\b\d+\b', '', text) # 移除單獨的數字詞
-
-    cleaned = []
-    for ch in text:
-        try:
-            if unicodedata.category(ch)[0] in ("L", "N", "Z"):
-                cleaned.append(ch.lower())
-        except TypeError:
-            pass 
-
+    text = re.sub(r'\b\d+\b', '', text) 
+    cleaned = [ch.lower() for ch in text if unicodedata.category(ch)[0] in ("L", "N", "Z")]
     return re.sub(r'\s+', ' ', ''.join(cleaned)).strip()
-
-# ⚠️ 由於文件上傳功能已移除，所有與文件處理和傳統自定義解析相關的函式 (如 is_valid_year, get_reference_keys, extract_in_text_citations, find_apa_matches 等) 均已從此檔案移除。
