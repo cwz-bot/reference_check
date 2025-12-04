@@ -4,6 +4,7 @@ import streamlit as st
 import pandas as pd
 import time
 import os
+import re  # <--- [新增] 用於正規表達式判斷中文
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 導入自定義模組
@@ -87,7 +88,7 @@ with st.sidebar:
                 index=default_idx,
                 disabled=True # 選項：您可以鎖定這個選單不讓人改，或者保留讓使用者看
             )
-            st.info("💡 系統優先搜尋本地庫，找不到才聯網。")
+            st.info("💡 系統優先搜尋本地庫 (限中文文獻)，找不到才聯網。")
     else:
         st.error(f"❌ 錯誤：找不到預設檔案 {DEFAULT_CSV_PATH}")
         st.warning("請確認檔案已放入專案資料夾中。")
@@ -107,7 +108,7 @@ with st.sidebar:
     st.subheader("🔍 檢查順序")
     st.markdown("""
     系統將依序檢查直到找到結果：
-    1. **本地 CSV 資料庫**
+    1. **本地 CSV 資料庫** (僅限中文)
     2. **Crossref** (DOI)
     3. **Scopus**
     4. **OpenAlex**
@@ -178,9 +179,15 @@ with tab2:
                     "sources": {},
                     "found_at_step": None
                 }
+                
+                # --- [新增] 語言判斷邏輯 ---
+                # 判斷標題是否包含中文字元 (Unicode 範圍 4E00-9FFF)
+                # 如果沒有標題，則預設不含中文 (False)
+                has_chinese = bool(re.search(r'[\u4e00-\u9fff]', title)) if title else False
 
                 # 🛑 Step 0: 本地 CSV 資料庫 (最優先)
-                if local_df is not None and target_col and title:
+                # 只有當標題包含中文時，才搜尋本地資料庫
+                if has_chinese and local_df is not None and target_col and title:
                     match_row, score = search_local_database(local_df, target_col, title, threshold=0.85)
                     if match_row is not None:
                         res["sources"]["Local DB"] = "本地資料庫匹配成功"
