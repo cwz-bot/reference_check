@@ -103,43 +103,43 @@ st.markdown('<div class="sub-header">使用 AnyStyle 自動解析與驗證參考
 with st.sidebar:
     st.header("⚙️ 設定")
     
-    # API 設定區
-    st.subheader("🔑 API 金鑰")
-    api_config = st.expander("API 設定", expanded=False)
-    with api_config:
-        scopus_status = "✅ 已設定" if st.secrets.get("scopus_api_key") else "❌ 未設定"
-        serpapi_status = "✅ 已設定" if st.secrets.get("serpapi_key") else "❌ 未設定"
-        st.write(f"Scopus API: {scopus_status}")
-        st.write(f"SerpAPI: {serpapi_status}")
-    
-    st.divider()
-    
-    # 檢查選項
-    st.subheader("🔍 檢查選項")
-    check_crossref = st.checkbox("Crossref (DOI)", value=True)
-    check_scopus = st.checkbox("Scopus", value=True)
-    check_scholar = st.checkbox("Google Scholar", value=True)
-    check_s2 = st.checkbox("Semantic Scholar", value=True)
-    check_openalex = st.checkbox("OpenAlex", value=True)
-    
-    st.divider()
-    
-    # 進階設定
-    st.subheader("🎛️ 進階設定")
-    similarity_threshold = st.slider(
-        "標題相似度門檻",
-        min_value=0.7,
-        max_value=1.0,
-        value=0.9,
-        step=0.05,
-        help="標題相似度需達此門檻才視為匹配"
+    # --- 1. 使用者輸入 Gemini Key ---
+    st.subheader("🔑 Gemini API 設定")
+    user_gemini_key = st.text_input(
+        "請輸入您的 Gemini API Key",
+        type="password",
+        help="請前往 Google AI Studio 申請免費金鑰",
+        placeholder="AIzaSy..."
     )
     
-    enable_remedial = st.checkbox(
-        "啟用補救搜尋",
-        value=True,
-        help="若標題檢查失敗，使用完整引用文字再次搜尋"
-    )
+    if not user_gemini_key:
+        st.warning("⚠️ 請輸入 Key 以開始使用")
+    else:
+        st.success("✅ Key 已輸入")
+
+    st.divider()
+    
+    # --- 2. 其他 API 狀態 (Scopus/SerpAPI 仍讀取後台) ---
+    st.subheader("📡 其他資料庫狀態")
+    scopus_status = "✅ 系統已內建" if st.secrets.get("scopus_api_key") else "❌ 未設定 (部分功能受限)"
+    serpapi_status = "✅ 系統已內建" if st.secrets.get("serpapi_key") else "❌ 未設定 (部分功能受限)"
+    st.text(f"Scopus: {scopus_status}")
+    st.text(f"SerpAPI: {serpapi_status}")
+    
+    st.divider()
+
+    # --- 3. 隱藏檢查選項，直接寫死預設值 (依序檢查) ---
+    check_crossref = True
+    check_scopus = True
+    check_scholar = True
+    check_s2 = True
+    check_openalex = True
+    
+    # 隱藏的參數設定
+    similarity_threshold = 0.9  # 固定相似度 0.9
+    enable_remedial = True      # 固定開啟補救搜尋
+    
+    st.info("ℹ️ 系統將自動依序檢查各大資料庫，確保引用正確性。")
 
 # ========== 主要內容區 (Tab 1, 2, 3 邏輯不變) ==========
 tab1, tab2, tab3 = st.tabs(["📝 輸入文獻", "🔍 檢查結果", "📊 統計報告"])
@@ -237,6 +237,7 @@ with tab2:
                 title, url = search_crossref_by_doi(result["doi"])
                 if url:
                     result["sources"]["Crossref"] = {"status": "✅ 找到", "url": url}
+                    found = True
 
             # 其餘以標題搜尋
             if result["title"]:
@@ -296,10 +297,11 @@ with tab2:
 
             try:
                 scopus_key = get_scopus_key() if check_scopus else None
-                serpapi_key = get_serpapi_key() if check_scholar else None
+                serpapi_key = get_serpapi_key() if (check_scholar or enable_remedial) else None
             except Exception as e:
-                st.error(f"❌ API 金鑰設定錯誤：{e}")
-                st.stop()
+                scopus_key = None
+                serpapi_key = None
+                st.warning(f"⚠️ 部分 API Key 未設定，可能影響檢查結果：{e}")
 
             api_keys = {"scopus": scopus_key, "serpapi": serpapi_key}
             check_opts = {
@@ -327,7 +329,6 @@ with tab2:
                     except Exception as e:
                         st.error(f"❌ 第 {i} 條引用檢查失敗：{e}")
                         continue
-
                     progress_bar.progress(i / total)
                     status_text.text(f"完成 {i}/{total} 條引用")
 
@@ -347,6 +348,8 @@ with tab2:
                     ["全部", "已驗證", "未驗證", "部分驗證"]
                 )
 
+            active_check_count = 5
+
             for result in st.session_state.results:
                 verified_count = sum(1 for s in result["sources"].values() if "✅" in s["status"])
                 total_checks = len(result["sources"])
@@ -358,15 +361,27 @@ with tab2:
                 with st.expander(f"📄 引用 {result['index']}", expanded=False):
                     st.markdown(f'<div class="ref-item">{result["text"]}</div>', unsafe_allow_html=True)
 
+                    # 顯示詳細欄位
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.write(f"**📰 標題**: {result['title'] or '❌ 無法擷取'}")
-                        st.write(f"**🏷️ 格式**: {result['style']}")
+                        st.write(f"**📰 標題**: {result.get('title', '❌ (Gemini 無法擷取)')}")
+                        st.write(f"**👤 作者**: {result.get('authors', 'N/A')}")
+                        st.write(f"**📰 期刊/會議**: {result.get('venue', 'N/A')}")
+                        st.write(f"**📅 年份**: {result.get('year', 'N/A')}")
                     with col2:
-                        st.write(f"**🔍 DOI**: {result['doi'] or '❌ 無'}")
-                        st.write(f"**✅ 驗證數**: {verified_count}/{total_checks}")
+                        st.write(f"**🏷️ 格式 (Gemini)**: {result.get('style', 'Other')}")
+                        st.write(f"**🔖 引用格式**: {result.get('citation_format', 'Other')}")
+                        st.write(f"**🔍 DOI**: {result.get('doi', '❌ (Gemini 無)')}")
+                        status_text = "✅ 已找到" if verified_count > 0 else "❌ 未找到"
+                        st.write(f"**驗證狀態**: {status_text}")
 
-                    if result["sources"]:
+                    # 顯示 Gemini 提取的 URL
+                    gemini_url = result.get("url")
+                    if gemini_url:
+                        st.write(f"**🔗 來源網址 (Gemini)**: {gemini_url}")
+
+                    # 顯示各資料來源檢查結果
+                    if result.get("sources"):
                         st.write("**🔗 資料來源檢查結果**:")
                         for source, info in result["sources"].items():
                             status_class = "badge-success" if "✅" in info["status"] else "badge-warning"
@@ -385,6 +400,8 @@ with tab3:
     if not st.session_state.results:
         st.warning("⚠️ 請先完成引用檢查")
     else:
+        active_check_count = 5
+
         # 總體統計
         total = len(st.session_state.results)
         fully_verified = sum(1 for r in st.session_state.results if r["sources"] and all("✅" in s["status"] for s in r["sources"].values()))
@@ -392,7 +409,7 @@ with tab3:
         unverified = total - fully_verified - partially_verified
         
         # 顯示指標卡片
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3)
         
         with col1:
             st.markdown(f"""<div class="metric-card"><h2>{total}</h2><p>總引用數</p></div>""", unsafe_allow_html=True)
@@ -447,7 +464,7 @@ with tab3:
             row = {"編號": r["index"], "引用文字": r["text"], "標題": r["title"], "DOI": r["doi"], "格式": r["style"], "驗證來源數": len([s for s in r["sources"].values() if "✅" in s["status"]])}
             for source, info in r["sources"].items():
                 row[f"{source}_狀態"] = info["status"]
-                row[f"{source}_連結"] = info["url"]
+                row[f"{source}_連結"] = info.get("url")
             export_data.append(row)
         
         df = pd.DataFrame(export_data)
