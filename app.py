@@ -4,7 +4,8 @@ import streamlit as st
 import pandas as pd
 import time
 import os
-import re  # <--- [新增] 用於正規表達式判斷中文
+import re
+import ast 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 導入自定義模組
@@ -55,59 +56,89 @@ st.markdown('<div class="main-header">📚 學術引用檢查器 (混合雲地�
 if "structured_references" not in st.session_state: st.session_state.structured_references = []
 if "results" not in st.session_state: st.session_state.results = []
 
-# ========== 側邊欄 ==========
+# ========== [輔助] 1. 人名格式化 ==========
+def format_name_field(data):
+    """將 AnyStyle 回傳的複雜人名格式統一轉為易讀字串。"""
+    if not data: return None
+    if isinstance(data, str) and not (data.startswith('[') or data.startswith('{')): return data
+
+    try:
+        if isinstance(data, str):
+            try: data = ast.literal_eval(data)
+            except: return data
+
+        names_list = []
+        if isinstance(data, dict): data = [data]
+        elif not isinstance(data, list): return str(data)
+
+        for item in data:
+            if isinstance(item, dict):
+                parts = []
+                if item.get('family'): parts.append(item['family'])
+                if item.get('given'): parts.append(item['given'])
+                if parts: names_list.append(", ".join(parts))
+            else:
+                names_list.append(str(item))
+        return "; ".join(names_list)
+    except:
+        return str(data)
+
+# ========== [核心修改] 2. 資料清洗與拆分修正 (Post-Processing) ==========
+def refine_parsed_data(parsed_item):
+    """
+    修正 AnyStyle 解析不完美的欄位 (純邏輯修復)。
+    """
+    item = parsed_item.copy()
+
+    # --- [修正] 更強的 Regex：處理 "(2nd ed.) Routledge" ---
+    # 說明：
+    # 1. ^([(\[]?.*?(?:ed\.|edition|edn)[)\]]?) -> 抓取開頭含有 ed./edition 的部分 (Group 1)，允許括號
+    # 2. \s*[:.,]?\s* -> 忽略中間的符號
+    # 3. (.+)$ -> 剩下的全部抓為出版社 (Group 2)
+    if item.get('edition') and not item.get('publisher'):
+        ed_text = item['edition']
+        match = re.search(r'^([(\[]?.*?(?:ed\.|edition|edn)[)\]]?)\s*[:.,]?\s*(.+)$', ed_text, re.IGNORECASE)
+        
+        if match:
+            item['edition'] = match.group(1).strip()       # 例如: (2nd ed.)
+            item['publisher'] = match.group(2).strip(' .,') # 例如: Routledge
+    
+    # --- 格式化人名 ---
+    if item.get('authors'): item['authors'] = format_name_field(item['authors'])
+    if item.get('editor'): item['editor'] = format_name_field(item['editor'])
+
+    return item
+
+# ========== 側邊欄 (保持不變) ==========
 with st.sidebar:
     st.header("⚙️ 設定")
     
-    # --- 1. 本地資料庫設定 (自動載入預設檔，隱藏上傳區) ---
     st.subheader("📂 本地資料庫 (優先檢查)")
-    
-    DEFAULT_CSV_PATH = "112ndltd.csv" # 鎖定預設檔案
+    DEFAULT_CSV_PATH = "112ndltd.csv"
     local_df = None
     target_col = None
     
-    # 直接檢查檔案是否存在並載入
     if os.path.exists(DEFAULT_CSV_PATH):
         @st.cache_data
-        def read_data_cached(file):
-            return load_csv_data(file)
-
+        def read_data_cached(file): return load_csv_data(file)
         local_df = read_data_cached(DEFAULT_CSV_PATH)
-        
         if local_df is not None:
             st.success(f"✅ 已載入內建資料庫: {len(local_df)} 筆資料")
-            
-            # 自動偵測標題欄位
             default_idx = 0
-            if "論文名稱" in local_df.columns:
-                default_idx = list(local_df.columns).index("論文名稱")
-            
-            target_col = st.selectbox(
-                "比對欄位:", # 簡化標籤
-                options=local_df.columns,
-                index=default_idx,
-                disabled=True # 選項：您可以鎖定這個選單不讓人改，或者保留讓使用者看
-            )
+            if "論文名稱" in local_df.columns: default_idx = list(local_df.columns).index("論文名稱")
+            target_col = st.selectbox("比對欄位:", options=local_df.columns, index=default_idx, disabled=True)
             st.info("💡 系統優先搜尋本地庫 (限中文文獻)，找不到才聯網。")
     else:
         st.error(f"❌ 錯誤：找不到預設檔案 {DEFAULT_CSV_PATH}")
-        st.warning("請確認檔案已放入專案資料夾中。")
     
     st.divider()
-
-    # --- 2. API 狀態 ---
     scopus_key = get_scopus_key()
     serpapi_key = get_serpapi_key()
-    
     st.info(f"Scopus API: {'✅ 已載入' if scopus_key else '❌ 未設定'}")
     st.info(f"SerpAPI: {'✅ 已載入' if serpapi_key else '❌ 未設定'}")
-    
     st.divider()
-    
-    # --- 3. 檢查順序說明 ---
     st.subheader("🔍 檢查順序")
     st.markdown("""
-    系統將依序檢查直到找到結果：
     1. **本地 CSV 資料庫** (僅限中文)
     2. **Crossref** (DOI)
     3. **Scopus**
@@ -115,8 +146,6 @@ with st.sidebar:
     5. **Semantic Scholar**
     6. **Google Scholar**
     """)
-    
-    # 強制開啟所有線上檢查
     check_crossref = True
     check_scopus = True
     check_openalex = True
@@ -144,8 +173,8 @@ with tab1:
             
             if struct_list:
                 st.session_state.structured_references = struct_list
-                st.success(f"✅ 解析成功！共識別出 {len(struct_list)} 筆文獻。請切換至「驗證結果」頁面。")
-                with st.expander("預覽解析細節 (JSON)"):
+                st.success(f"✅ 解析成功！共識別出 {len(struct_list)} 筆文獻。")
+                with st.expander("🔍 預覽解析結果 (Debug JSON)"):
                     st.json(struct_list[:3])
             else:
                 st.error("解析失敗，請確認 Docker 是否正在執行。")
@@ -155,7 +184,6 @@ with tab2:
     if not st.session_state.structured_references:
         st.info("請先在第一頁輸入並解析文獻。")
     else:
-        # 開始檢查按鈕
         if st.button("🔍 開始驗證所有文獻 (循序模式)", type="primary"):
             st.session_state.results = []
             progress = st.progress(0)
@@ -165,8 +193,10 @@ with tab2:
             total = len(refs)
             results_buffer = []
 
-            # 定義單筆檢查函式
-            def check_single_sequential(idx, ref):
+            def check_single_sequential(idx, raw_ref):
+                # 1. 先修正 AnyStyle 的資料
+                ref = refine_parsed_data(raw_ref)
+                
                 title = ref.get('title', '')
                 text = ref.get('text', '')
                 doi = ref.get('doi')
@@ -175,18 +205,14 @@ with tab2:
                     "id": idx,
                     "title": title,
                     "text": text,
-                    "parsed": ref, # 保存解析資料
+                    "parsed": ref,
                     "sources": {},
                     "found_at_step": None
                 }
                 
-                # --- [新增] 語言判斷邏輯 ---
-                # 判斷標題是否包含中文字元 (Unicode 範圍 4E00-9FFF)
-                # 如果沒有標題，則預設不含中文 (False)
                 has_chinese = bool(re.search(r'[\u4e00-\u9fff]', title)) if title else False
 
-                # 🛑 Step 0: 本地 CSV 資料庫 (最優先)
-                # 只有當標題包含中文時，才搜尋本地資料庫
+                # 🛑 Step 0: Local DB
                 if has_chinese and local_df is not None and target_col and title:
                     match_row, score = search_local_database(local_df, target_col, title, threshold=0.85)
                     if match_row is not None:
@@ -243,7 +269,6 @@ with tab2:
 
                 return res
 
-            # 多執行緒執行
             max_workers = min(5, total)
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {executor.submit(check_single_sequential, i+1, r): i for i, r in enumerate(refs)}
@@ -263,12 +288,11 @@ with tab2:
             st.rerun()
 
         # ======================================================
-        # 顯示結果 (含篩選功能)
+        # 顯示結果
         # ======================================================
         if st.session_state.results:
             st.divider()
             
-            # 篩選選單
             col1, col2 = st.columns([1, 3])
             with col1:
                 filter_option = st.selectbox(
@@ -277,7 +301,6 @@ with tab2:
                     index=0
                 )
             
-            # 統計數據
             verified_count = sum(1 for r in st.session_state.results if r.get('found_at_step'))
             unverified_count = len(st.session_state.results) - verified_count
             with col2:
@@ -285,43 +308,79 @@ with tab2:
 
             st.divider()
 
-            # 結果迴圈
             for res in st.session_state.results:
                 found_step = res.get('found_at_step')
                 is_verified = found_step is not None
                 
-                # --- 篩選邏輯 ---
                 if filter_option == "✅ 已驗證成功" and not is_verified: continue
                 if filter_option == "❌ 未找到結果" and is_verified: continue
-                # ----------------
 
                 status_label = f"✅ {found_step}" if found_step else "❌ 未找到"
                 bg_color = "#D1FAE5" if found_step else "#FEE2E2"
                 
                 p = res.get('parsed', {})
 
-                with st.expander(f"{res['id']}. {res['title'][:80]}..."):
-                    # 1. 狀態列
+                with st.expander(f"{res['id']}. {p.get('title', '無標題')[:80]}..."):
                     st.markdown(f"""
                     <div style="background-color: {bg_color}; padding: 10px; border-radius: 5px; margin-bottom: 15px;">
                         <b>狀態:</b> {status_label}
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # 2. 詳細欄位資料 (表格)
+                    # -----------------------------------------------------------------
+                    # [顯示邏輯修正]
+                    # -----------------------------------------------------------------
+                    
+                    # 1. 作者/編者
+                    display_author = p.get('authors')
+                    if not display_author and p.get('editor'):
+                        display_author = f"{p['editor']} (Ed.)"
+                    if not display_author: display_author = "N/A"
+
+                    # 2. 標題 + 版次 (將版次搬到這裡顯示)
+                    display_title = p.get('title', 'N/A')
+                    if p.get('edition'):
+                        # 顯示格式: Title (2nd ed.)
+                        display_title += f" {p['edition']}"
+
+                    # 3. 出處 (Source) - 現在只負責顯示 期刊/出版社/網址
+                    source_parts = []
+                    
+                    # (A) 期刊名
+                    if p.get('container-title'): source_parts.append(p['container-title'])
+                    elif p.get('journal'): source_parts.append(p['journal'])
+                    
+                    # (B) 出版社 (經過 refine，Routledge 應該被救出來了)
+                    if p.get('publisher'):
+                        pub_str = p['publisher']
+                        if p.get('location'): pub_str = f"{p['location']}: {pub_str}"
+                        source_parts.append(pub_str)
+                    
+                    # (C) [關鍵] 版次已經搬到 Title 了，這裡不需要再顯示版次
+                    # 這樣 "出處" 欄位就不會出現奇怪的 "2nd"
+                    
+                    # (D) Note/Genre/URL
+                    if p.get('genre'): source_parts.append(p['genre'])
+                    if p.get('note'): source_parts.append(p['note'])
+                    
+                    if not source_parts and p.get('url'): 
+                        source_parts.append("Web Source")
+
+                    display_source = ", ".join(source_parts) if source_parts else "N/A"
+                    # -----------------------------------------------------------------
+                    
                     st.markdown(f"""
                     | | |
                     | :--- | :--- |
-                    | **👥 作者** | `{p.get('authors', 'N/A')}` |
-                    | **📅 年份** | `{p.get('date', 'N/A')}` |
-                    | **📰 標題** | `{p.get('title', 'N/A')}` |
-                    | **📖 期刊** | `{p.get('container-title', p.get('journal', 'N/A'))}` |
-                    | **🔢 DOI** | `{p.get('doi', 'N/A')}` |
+                    | **👥 作者/編者** | `{display_author}` |
+                    | **📅 發表年份** | `{p.get('date', 'N/A')}` |
+                    | **📰 文獻標題** | `{display_title}` |
+                    | **🏢 出處/發行** | `{display_source}` |
+                    | **🔢 DOI/URL** | `{p.get('doi', p.get('url', 'N/A'))}` |
                     """)
                     
                     st.divider()
 
-                    # 3. 原始文獻與連結
                     st.markdown("**📜 原始文獻:**")
                     st.markdown(f"<div class='ref-box'>{res['text']}</div>", unsafe_allow_html=True)
                     
@@ -335,19 +394,16 @@ with tab2:
                     else:
                         st.warning("在所有啟用的資料庫中皆未找到匹配項。")
 
-# --- TAB 3: 統計 ---
+# --- TAB 3: 統計 (保持不變) ---
 with tab3:
     if st.session_state.results:
         df = pd.DataFrame(st.session_state.results)
         df['Source'] = df['found_at_step'].fillna('Not Found')
-        
         total = len(df)
         verified_count = len(df[df['Source'] != 'Not Found'])
-        
         col1, col2 = st.columns(2)
         col1.metric("總文獻數", total)
         col2.metric("成功驗證數", verified_count, f"{verified_count/total*100:.1f}%")
-        
         st.subheader("驗證來源分佈")
         st.bar_chart(df['Source'].value_counts())
         
@@ -359,9 +415,7 @@ with tab3:
             row['verified_source'] = r.get('found_at_step', 'Not Found')
             row['verified_url'] = list(r['sources'].values())[0] if r['sources'] else ''
             export_data.append(row)
-            
         st.dataframe(pd.DataFrame(export_data), use_container_width=True)
-        
         csv = pd.DataFrame(export_data).to_csv(index=False).encode('utf-8-sig')
         st.download_button("📥 下載完整報告 CSV", csv, "report.csv", "text/csv")
     else:
