@@ -84,26 +84,80 @@ def format_name_field(data):
         return str(data)
 
 # ========== [核心修改] 2. 資料清洗與拆分修正 (Post-Processing) ==========
+# app.py
+
 def refine_parsed_data(parsed_item):
     """
-    修正 AnyStyle 解析不完美的欄位 (純邏輯修復)。
+    修正 AnyStyle 解析不完美的欄位 (增強版救援機制)。
+    針對 RFC/Tech Report 等非標準格式進行暴力修復。
     """
     item = parsed_item.copy()
 
-    # --- [修正] 更強的 Regex：處理 "(2nd ed.) Routledge" ---
-    # 說明：
-    # 1. ^([(\[]?.*?(?:ed\.|edition|edn)[)\]]?) -> 抓取開頭含有 ed./edition 的部分 (Group 1)，允許括號
-    # 2. \s*[:.,]?\s* -> 忽略中間的符號
-    # 3. (.+)$ -> 剩下的全部抓為出版社 (Group 2)
+    # 1. 取得基本欄位
+    title = item.get('title', '')
+    
+    # 定義需要檢查的「垃圾桶欄位」 (AnyStyle 常把標題誤丟到這裡)
+    # 注意：順序很重要，優先檢查 publisher 和 container-title
+    garbage_fields = ['publisher', 'container-title', 'date', 'location', 'note']
+    
+    candidate_text = ""
+    found_field = ""
+
+    # 2. 🚑 [救援機制啟動]：如果標題是空的，或者標題太短(可能是誤判)
+    if not title or len(title) < 5:
+        # 遍歷所有可能存放了標題的欄位
+        for field in garbage_fields:
+            val = item.get(field)
+            # 如果這個欄位有值，而且長度夠長 (包含標題特徵)
+            if val and isinstance(val, str) and len(val) > 10:
+                # 特徵檢查：如果內容包含 "Jun. 2004)" 這種日期結尾，很有可能就是目標
+                if re.search(r'\d{4}.*?[)\]]\.?\s', val) or "RFC" in val:
+                    candidate_text = val
+                    found_field = field
+                    break
+        
+        # 如果找到了疑似包含標題的長字串
+        if candidate_text:
+            # --- 嘗試切割字串 ---
+            
+            # 策略 A: 針對 "日期). 標題" 的格式 (你的案例)
+            # Regex 解釋: 
+            # 1. ^.*? 忽略開頭
+            # 2. \d{4} 找到年份
+            # 3. .*?[)\]]\.? 找到年份後的括號和點 (例如 "2004).")
+            # 4. \s+ 忽略空白
+            # 5. (.*?) 抓取標題 (Group 1)
+            # 6. (?=...) 停在 RFC、Online、Availability 或字串結束的地方
+            match_a = re.search(r'\d{4}.*?[)\]]\.?\s+(.*?)(?=\s*[\(\[]RFC|\s*[\(\[]Online|\s*Avail|\s*$)', candidate_text, re.IGNORECASE)
+            
+            if match_a:
+                extracted_title = match_a.group(1).strip()
+                item['title'] = extracted_title
+                # 選擇性：把標題從原本的欄位移走，讓畫面乾淨點 (可不做)
+                # item[found_field] = candidate_text.replace(extracted_title, "").strip()
+            
+            # 策略 B: 如果策略 A 失敗，且字串裡有 RFC，直接把 RFC 前面的當作標題
+            elif "RFC" in candidate_text:
+                parts = candidate_text.split("RFC")
+                # 取 RFC 前面的部分，並去掉可能的日期前綴
+                potential_title = parts[0]
+                # 去掉尾部的括號
+                potential_title = re.sub(r'[\(\[]$', '', potential_title).strip()
+                # 去掉開頭的日期 (例如 "Jun. 2004). ")
+                potential_title = re.sub(r'^.*?\d{4}.*?[)\]]\.?\s*', '', potential_title).strip()
+                
+                if len(potential_title) > 5:
+                    item['title'] = potential_title
+
+    # 3. [原有邏輯] 處理 Edition 和 Publisher 黏在一起的情況
     if item.get('edition') and not item.get('publisher'):
         ed_text = item['edition']
         match = re.search(r'^([(\[]?.*?(?:ed\.|edition|edn)[)\]]?)\s*[:.,]?\s*(.+)$', ed_text, re.IGNORECASE)
-        
         if match:
-            item['edition'] = match.group(1).strip()       # 例如: (2nd ed.)
-            item['publisher'] = match.group(2).strip(' .,') # 例如: Routledge
+            item['edition'] = match.group(1).strip()       
+            item['publisher'] = match.group(2).strip(' .,') 
     
-    # --- 格式化人名 ---
+    # 4. 格式化人名
     if item.get('authors'): item['authors'] = format_name_field(item['authors'])
     if item.get('editor'): item['editor'] = format_name_field(item['editor'])
 
