@@ -5,6 +5,7 @@ import requests
 import urllib.parse
 import time
 import random
+import urllib3
 from difflib import SequenceMatcher
 from serpapi import GoogleSearch
 
@@ -19,7 +20,7 @@ OPENALEX_API_URL = "https://api.openalex.org/works"
 MAX_RETRIES = 2
 INITIAL_DELAY = 1 
 TIMEOUT = 10
-TITLE_SIMILARITY_THRESHOLD = 0.90 
+TITLE_SIMILARITY_THRESHOLD = 0.85 
 
 # ========== API Key 管理 ==========
 def get_scopus_key():
@@ -37,7 +38,7 @@ def _read_key_file(filename):
 
 # --- API 呼叫輔助 (重試機制) ---
 def _call_external_api_with_retry(url: str, params: dict, api_name: str) -> dict | None:
-    headers = {'User-Agent': 'ReferenceChecker/1.0'}
+    headers = {'User-Agent': 'ReferenceChecker/1.0 (mailto:admin@example.com)'}
     
     for attempt in range(MAX_RETRIES):
         delay = INITIAL_DELAY * (2 ** attempt) + random.uniform(0, 1)
@@ -55,10 +56,12 @@ def _call_external_api_with_retry(url: str, params: dict, api_name: str) -> dict
             
     return None
 
-# ========== 1. Crossref (DOI) ==========
+# ========== 1. Crossref (DOI & Text Search) ==========
 def search_crossref_by_doi(doi):
     if not doi: return None, None
-    url = f"https://api.crossref.org/works/{doi}"
+    # 確保 DOI 乾淨
+    clean_doi = doi.strip(' ,.;)]}>')
+    url = f"https://api.crossref.org/works/{clean_doi}"
     try:
         response = requests.get(url, timeout=5)
         if response.status_code == 200:
@@ -69,6 +72,33 @@ def search_crossref_by_doi(doi):
     except:
         pass
     return None, None
+
+def search_crossref_by_text(title, author=None):
+    """
+    Crossref 文字搜尋
+    """
+    if not title: return None, None
+    
+    params = {
+        'query.bibliographic': title, # 優先只用標題
+        'rows': 1,
+        'select': 'title,URL,DOI,score'
+    }
+    
+    # 如果標題太短，加入作者增加準確度
+    if author and len(title) < 20:
+        params['query.author'] = author
+    
+    data = _call_external_api_with_retry("https://api.crossref.org/works", params, "Crossref-Text")
+    
+    if data and data.get('message', {}).get('items'):
+        item = data['message']['items'][0]
+        res_title = item.get('title', [''])[0]
+        
+        if _is_match(title, res_title):
+            return item.get('URL') or f"https://doi.org/{item.get('DOI')}"
+            
+    return None
 
 # ========== 2. Scopus ==========
 def search_scopus_by_title(title, api_key):
@@ -90,7 +120,7 @@ def search_scopus_by_title(title, api_key):
     return None
 
 # ========== 3. Google Scholar (SerpAPI) ==========
-def search_scholar_by_title(title, api_key, threshold=0.90):
+def search_scholar_by_title(title, api_key, threshold=0.85):
     if not api_key or not title: return None, "no_result"
     
     params = {
@@ -139,35 +169,91 @@ def search_scholar_by_ref_text(ref_text, api_key):
         pass
     return None, "no_result"
 
-# ========== 4. Semantic Scholar ==========
-def search_s2_by_title(title):
+# ========== 4. Semantic Scholar (Smart Fallback) ==========
+def search_s2_by_title(title, author=None):
     if not title: return None
-    params = {'query': title, 'limit': 1, 'fields': 'title,url'}
     
+    # [修正邏輯] 策略 1: 優先"只"用標題搜尋 (這對 Weka 這種知名論文最有效)
+    params = {'query': title, 'limit': 1, 'fields': 'title,url'}
     data = _call_external_api_with_retry(S2_API_URL, params, "S2")
     
     if data and data.get('data'):
         match = data['data'][0]
         if _is_match(title, match.get('title')):
             return match.get('url')
+            
+    # 策略 2: 只有當標題很短、找不到、且有作者時，才加作者輔助
+    if (not data or not data.get('data')) and author and len(title) < 50:
+        params['query'] = f"{title} {author}"
+        data = _call_external_api_with_retry(S2_API_URL, params, "S2-Author")
+        if data and data.get('data'):
+            match = data['data'][0]
+            if _is_match(title, match.get('title')):
+                return match.get('url')
+                
     return None
 
-# ========== 5. OpenAlex ==========
-def search_openalex_by_title(title):
+# ========== 5. OpenAlex (Smart Fallback) ==========
+def search_openalex_by_title(title, author=None):
     if not title: return None
-    params = {'search': title, 'per_page': 1, 'select': 'title,doi,id'}
     
+    # 策略 1: 優先搜標題
+    params = {'search': title, 'per_page': 1, 'select': 'title,doi,id'}
     data = _call_external_api_with_retry(OPENALEX_API_URL, params, "OpenAlex")
     
     if data and data.get('results'):
         match = data['results'][0]
         if _is_match(title, match.get('title')):
             return match.get('doi') or match.get('id')
+            
+    # 策略 2: 找不到才加作者
+    if author:
+        params['search'] = f"{title} {author}"
+        data = _call_external_api_with_retry(OPENALEX_API_URL, params, "OpenAlex-Author")
+        if data and data.get('results'):
+            match = data['results'][0]
+            if _is_match(title, match.get('title')):
+                return match.get('doi') or match.get('id')
+                
     return None
 
 def _is_match(query, result):
     if not query or not result: return False
     c_q = clean_title(query)
     c_r = clean_title(result)
-    if c_q == c_r: return True
+    
+    if c_q in c_r or c_r in c_q:
+        len_diff = abs(len(c_q) - len(c_r))
+        if len_diff / max(len(c_q), len(c_r)) < 0.4:
+            return True
+
     return SequenceMatcher(None, c_q, c_r).ratio() >= TITLE_SIMILARITY_THRESHOLD
+
+# ========== 6. URL Availability Check ==========
+def check_url_availability(url):
+    """
+    檢查 URL 是否有效。
+    """
+    if not url or not url.startswith("http"):
+        return False
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+    }
+    
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    try:
+        response = requests.head(url, headers=headers, timeout=5, allow_redirects=True, verify=False)
+        if 200 <= response.status_code < 400:
+            return True
+        
+        response = requests.get(url, headers=headers, timeout=8, stream=True, verify=False)
+        if 200 <= response.status_code < 400:
+            return True
+            
+    except Exception:
+        pass
+        
+    return False
