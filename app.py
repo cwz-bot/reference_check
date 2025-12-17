@@ -205,7 +205,7 @@ with tab1:
                 st.session_state.structured_references = struct_list
                 st.success(f"✅ 解析成功！共 {len(struct_list)} 筆。")
             else:
-                st.error("解析失敗，請確認 Docker 是否正在執行。")
+                st.error("❌ AnyStyle 本機解析失敗，請確認 Ruby / anystyle-cli 是否正確安裝。")
 
 with tab2:
     if not st.session_state.structured_references:
