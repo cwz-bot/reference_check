@@ -27,7 +27,7 @@ from modules.api_clients import (
 )
 
 # ========== 頁面設定 ==========
-st.set_page_config(page_title="學術引用檢查器 (Local DB + Docker)", page_icon="📚", layout="wide")
+st.set_page_config(page_title="學術引用檢查器 (Debug 版)", page_icon="📚", layout="wide")
 
 st.markdown("""
 <style>
@@ -51,7 +51,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-header">📚 學術引用檢查器 (混合雲地版)</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">📚 學術引用檢查器 (API 診斷增強版)</div>', unsafe_allow_html=True)
 
 # ========== Session State ==========
 if "structured_references" not in st.session_state: st.session_state.structured_references = []
@@ -80,59 +80,40 @@ def format_name_field(data):
     except:
         return str(data)
 
-# ========== [核心修改] 2. 資料清洗與拆分修正 (究極版) ==========
+# ========== [核心修改] 2. 資料清洗與拆分修正 ==========
 def refine_parsed_data(parsed_item):
-    """
-    修正 AnyStyle 解析結果，包含強力 DOI 提取與 RFC 標題救援。
-    """
     item = parsed_item.copy()
-    
-    # 1. 基礎清理：移除所有欄位的尾部標點
     for key in ['doi', 'url', 'title', 'date']:
         if item.get(key) and isinstance(item[key], str):
             item[key] = item[key].strip(' ,.;)]}>')
 
-    # 2. [DOI 強力救援] 
-    # 掃描 URL 欄位，尋找是否隱藏了 DOI (格式: 10.xxxx/xxxx)
     url_val = item.get('url', '')
     if url_val:
-        # Regex 解釋: 匹配 10. 開頭，接著4-9位數字，斜線，然後是任意字元
         doi_match = re.search(r'(10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+)', url_val)
         if doi_match:
             extracted_doi = doi_match.group(1).strip('.')
             item['doi'] = extracted_doi
-            
-            # 如果 URL 只是 DOI 的連結 (如 https://doi.org/10...)，則清空 URL
-            # 這樣可以避免 Step 6 把它當作網站去檢查
             if 'doi.org' in url_val or url_val.replace('http://', '').startswith(extracted_doi):
                 item['url'] = None
     
-    # 3. 標題救援 (RFC 等特殊格式)
     title = item.get('title', '')
-    # [新增] journal 欄位，因為有時候 AnyStyle 會把長字串塞在這裡
     garbage_fields = ['publisher', 'container-title', 'journal', 'date', 'location', 'note']
     candidate_text = ""
 
-    # 如果標題是空的，或者標題看起來像是年份/編號 (太短)
     if not title or len(title) < 5:
         for field in garbage_fields:
             val = item.get(field)
             if val and isinstance(val, str) and len(val) > 10:
-                # 特徵：包含年份括號 "2004)" 或 "RFC"
                 if re.search(r'\d{4}.*?[)\]]\.?\s', val) or "RFC" in val:
                     candidate_text = val
                     break
         
         if candidate_text:
-            # 策略 A: 針對 "日期). 標題" 的格式 (放寬 Regex: \s+ 改為 \s*)
             match_a = re.search(r'\d{4}.*?[)\]]\.?\s*(.*?)(?=\s*[\(\[]RFC|\s*[\(\[]Online|\s*Avail|\s*$)', candidate_text, re.IGNORECASE)
-            
             if match_a:
                 extracted_title = match_a.group(1).strip()
-                if len(extracted_title) > 3: # 確保抓到的不是空字串
+                if len(extracted_title) > 3:
                     item['title'] = extracted_title
-            
-            # 策略 B: 針對 RFC 直接切割
             elif "RFC" in candidate_text:
                 parts = candidate_text.split("RFC")
                 potential_title = parts[0]
@@ -141,15 +122,13 @@ def refine_parsed_data(parsed_item):
                 if len(potential_title) > 5:
                     item['title'] = potential_title
 
-    # 4. 版次/出版社分離
     if item.get('edition') and not item.get('publisher'):
         ed_text = item['edition']
         match = re.search(r'^([(\[]?.*?(?:ed\.|edition|edn)[)\]]?)\s*[:.,]?\s*(.+)$', ed_text, re.IGNORECASE)
         if match:
-            item['edition'] = match.group(1).strip()       
-            item['publisher'] = match.group(2).strip(' .,') 
+            item['edition'] = match.group(1).strip()
+            item['publisher'] = match.group(2).strip(' .,')
     
-    # 5. 格式化人名
     if item.get('authors'): item['authors'] = format_name_field(item['authors'])
     if item.get('editor'): item['editor'] = format_name_field(item['editor'])
     
@@ -222,23 +201,21 @@ with tab2:
             results_buffer = []
 
             def check_single_sequential(idx, raw_ref):
-                # 1. 強力清洗與欄位修正 (DOI 搬家發生在這裡)
                 ref = refine_parsed_data(raw_ref)
-                
                 title = ref.get('title', '')
                 text = ref.get('text', '')
-                doi = ref.get('doi')     # 已經從 URL 救回來了
+                doi = ref.get('doi')
                 parsed_url = ref.get('url')
                 
-                # 提取第一作者 (用於輔助搜尋)
                 first_author = ""
                 if ref.get('authors'):
                     auth_raw = ref['authors'].split(';')[0].split(',')[0]
                     first_author = auth_raw[:20].strip()
 
+                # 初始化結果字典，加入 debug_logs
                 res = {
                     "id": idx, "title": title, "text": text, "parsed": ref,
-                    "sources": {}, "found_at_step": None
+                    "sources": {}, "found_at_step": None, "debug_logs": {} 
                 }
 
                 has_chinese = bool(re.search(r'[\u4e00-\u9fff]', title)) if title else False
@@ -250,79 +227,80 @@ with tab2:
                         res["sources"]["Local DB"] = "本地資料庫匹配成功"
                         res["found_at_step"] = "0. Local Database"
                         return res
+                    res["debug_logs"]["Local DB"] = f"未找到 (最高相似度: {score:.2f})"
 
-                # Step 1: Crossref (DOI or Text)
+                # Step 1: Crossref
                 if check_crossref:
                     if doi:
-                        _, url = search_crossref_by_doi(doi)
+                        _, url, status = search_crossref_by_doi(doi)
                         if url:
                             res["sources"]["Crossref"] = url
                             res["found_at_step"] = "1. Crossref (DOI)"
                             return res
-                    # 無 DOI，嘗試文字搜尋
+                        res["debug_logs"]["Crossref (DOI)"] = status
                     elif title and len(title) > 5:
-                        url = search_crossref_by_text(title, first_author)
+                        url, status = search_crossref_by_text(title, first_author)
                         if url:
                             res["sources"]["Crossref"] = url
                             res["found_at_step"] = "1. Crossref (Text)"
                             return res
+                        res["debug_logs"]["Crossref (Text)"] = status
 
                 # Step 2: Scopus
                 if check_scopus and scopus_key and title:
-                    url = search_scopus_by_title(title, scopus_key)
+                    url, status = search_scopus_by_title(title, scopus_key)
                     if url:
                         res["sources"]["Scopus"] = url
                         res["found_at_step"] = "2. Scopus"
-                        return res 
+                        return res
+                    res["debug_logs"]["Scopus"] = status
 
-                # Step 3: OpenAlex (Smart Fallback)
+                # Step 3: OpenAlex
                 if check_openalex and title:
-                    url = search_openalex_by_title(title, first_author)
+                    url, status = search_openalex_by_title(title, first_author)
                     if url:
                         res["sources"]["OpenAlex"] = url
                         res["found_at_step"] = "3. OpenAlex"
-                        return res 
+                        return res
+                    res["debug_logs"]["OpenAlex"] = status
 
-                # Step 4: Semantic Scholar (Smart Fallback)
+                # Step 4: Semantic Scholar
                 if check_s2 and title:
-                    url = search_s2_by_title(title, first_author)
+                    url, status = search_s2_by_title(title, first_author)
                     if url:
                         res["sources"]["Semantic Scholar"] = url
                         res["found_at_step"] = "4. Semantic Scholar"
-                        return res 
+                        return res
+                    res["debug_logs"]["Semantic Scholar"] = status
 
                 # Step 5: Google Scholar
                 if check_scholar and serpapi_key:
                     if title:
                         url, status = search_scholar_by_title(title, serpapi_key)
-                        if status in ["match", "similar"]:
+                        if url:
                             res["sources"]["Google Scholar"] = url
                             res["found_at_step"] = "5. Scholar (Title)"
-                            return res 
+                            return res
+                        res["debug_logs"]["Scholar (Title)"] = status
                     
-                    url_r, status_r = search_scholar_by_ref_text(text, serpapi_key)
-                    if status_r != "no_result":
+                    url_r, status_r = search_scholar_by_ref_text(text, serpapi_key, target_title=title)
+                    if url_r:
                         res["sources"]["Google Scholar (補救)"] = url_r
                         res["found_at_step"] = "5. Scholar (Text)"
-                        return res 
+                        return res
+                    res["debug_logs"]["Scholar (Text)"] = status_r
 
-                # Step 6: Website Check
-                # [修正] 嚴格網站檢查：
-                # 1. 必須是 http 開頭
-                # 2. 不能包含 'doi.org' (因為那是論文連結)
-                # 3. 不能包含 '10.xxxx/' (避免漏網的 DOI)
+                # Step 6: Website Check (不在此回傳 debug，維持原邏輯)
                 if parsed_url and parsed_url.startswith('http'):
                     is_doi_link = 'doi.org' in parsed_url or re.search(r'10\.\d{4}/', parsed_url)
-                    
                     if not is_doi_link:
-                        is_valid = check_url_availability(parsed_url)
-                        if is_valid:
+                        if check_url_availability(parsed_url):
                             res["sources"]["Direct Link"] = parsed_url
                             res["found_at_step"] = "6. Website / Direct URL"
                             return res
                         else:
                             res["sources"]["Direct Link (Dead)"] = parsed_url
-                            res["found_at_step"] = "6. Website (Link Failed)" 
+                            res["found_at_step"] = "6. Website (Link Failed)"
                             return res
 
                 return res
@@ -373,7 +351,6 @@ with tab2:
 
             for res in st.session_state.results:
                 found_step = res.get('found_at_step')
-                
                 is_db_verified = found_step and "Website" not in found_step
                 is_web_valid = found_step == "6. Website / Direct URL"
                 is_web_failed = found_step == "6. Website (Link Failed)"
@@ -420,7 +397,14 @@ with tab2:
                             elif link.startswith("http"): st.markdown(f"- **{src}**: [點擊開啟]({link})")
                             else: st.markdown(f"- **{src}**: {link}")
                     else:
-                        st.warning("在所有啟用的資料庫中皆未找到匹配項。")
+                        st.error("⚠️ 在所有啟用的資料庫中皆未找到匹配項。")
+                        # 新增 debug_logs 顯示區塊
+                        with st.expander("🔍 查看每個資料庫的詳細失敗原因 (Debug Logs)"):
+                            if res.get("debug_logs"):
+                                for api, msg in res["debug_logs"].items():
+                                    st.write(f"**{api}**: {msg}")
+                            else:
+                                st.write("沒有可用的診斷記錄。")
 
 with tab3:
     if st.session_state.results:
