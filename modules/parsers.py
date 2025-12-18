@@ -39,25 +39,25 @@ def parse_references_with_anystyle(raw_text_for_anystyle):
         return [], []
 
     # 3️⃣ 組合指令（明確指定 ruby.exe）
-    # command = [
-    #     RUBY_EXE,
-    #     "-S",
-    #     "anystyle",
-    #     "--stdout",
-    #     "-f", "json",
-    #     "parse",
-    #     tmp_path
-    # ]
-    # 中文 model
     command = [
         RUBY_EXE,
         "-S",
         "anystyle",
-        "-P", "custom.mod",
+        "--stdout",
         "-f", "json",
         "parse",
         tmp_path
     ]
+    # 中文 model
+    # command = [
+    #     RUBY_EXE,
+    #     "-S",
+    #     "anystyle",
+    #     "-P", "custom.mod",
+    #     "-f", "json",
+    #     "parse",
+    #     tmp_path
+    # ]
 
     try:
         process = subprocess.run(

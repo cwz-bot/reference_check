@@ -203,6 +203,7 @@ with tab1:
                 raw_list, struct_list = parse_references_with_anystyle(raw_input)
             if struct_list:
                 st.session_state.structured_references = struct_list
+                print(struct_list)
                 st.success(f"✅ 解析成功！共 {len(struct_list)} 筆。")
             else:
                 st.error("❌ AnyStyle 本機解析失敗，請確認 Ruby / anystyle-cli 是否正確安裝。")
