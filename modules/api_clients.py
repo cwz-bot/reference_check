@@ -161,19 +161,35 @@ def search_s2_by_title(title, author=None):
     data, status = _call_external_api_with_retry(S2_API_URL, params)
     if status == "OK" and data.get('data'):
         match = data['data'][0]
-        if _is_match(title, match.get('title')):
-            return match.get('url'), "OK"
+        res_title = match.get('title')
+        res_url = match.get('url')
+
+        if _is_match(title, res_title):
+            if res_url: # 確保有網址
+                return res_url, "OK"
+            return None, "No URL found for this match"
+        return None, "Match failed"
     return None, status
 
 def search_openalex_by_title(title, author=None):
     params = {'search': title, 'per_page': 1}
     data, status = _call_external_api_with_retry(OPENALEX_API_URL, params)
+    
     if status == "OK" and data.get('results'):
         match = data['results'][0]
         if _is_match(title, match.get('title')):
+            # 取得連結，若兩者皆無則為 None
             url = match.get('doi') or match.get('id')
-            return url, "OK"
-    return None, status
+            
+            # --- 修改重點：檢查是否有連結 ---
+            if url:
+                return url, "OK"
+            else:
+                return None, "No Link Available (Found title but no URL)"
+        else:
+            return None, "Match failed (Title Mismatch)"
+            
+    return None, status if status != "OK" else "No results found"
 
 def check_url_availability(url):
     if not url or not url.startswith("http"): return False
