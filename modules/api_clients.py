@@ -20,7 +20,9 @@ OPENALEX_API_URL = "https://api.openalex.org/works"
 MAX_RETRIES = 2
 INITIAL_DELAY = 1 
 TIMEOUT = 10
-TITLE_SIMILARITY_THRESHOLD = 0.85 
+
+# 將門檻調至 1.0 (代表必須完全相同)
+TITLE_SIMILARITY_THRESHOLD = 1.0 
 
 # ========== API Key 管理 ==========
 def get_scopus_key():
@@ -36,29 +38,25 @@ def _read_key_file(filename):
     except FileNotFoundError:
         return None
 
-# --- API 呼叫輔助 (重試機制強化版) ---
+# --- API 呼叫輔助 (重試機制) ---
 def _call_external_api_with_retry(url: str, params: dict, api_name: str):
-    headers = {'User-Agent': 'ReferenceChecker/1.0 (mailto:admin@example.com)'}
+    headers = {'User-Agent': 'ReferenceChecker/1.0'}
     last_error = "Unknown"
     
     for attempt in range(MAX_RETRIES):
-        delay = INITIAL_DELAY * (2 ** attempt) + random.uniform(0, 1)
         try:
             response = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
-            
             if response.status_code == 200:
                 return response.json(), "OK"
             elif response.status_code == 429:
-                last_error = f"Rate Limit (429)"
-                time.sleep(delay)
+                last_error = "Rate Limit (429)"
+                time.sleep(2)
             elif response.status_code in [401, 403]:
                 return None, f"Auth Error ({response.status_code})"
             else:
-                last_error = f"HTTP Error {response.status_code}"
-                time.sleep(delay)
-        except requests.exceptions.RequestException as e:
+                last_error = f"HTTP {response.status_code}"
+        except Exception as e:
             last_error = f"Conn Error: {type(e).__name__}"
-            time.sleep(delay)
             
     return None, last_error
 
@@ -76,14 +74,11 @@ def search_crossref_by_doi(doi):
             return title, item.get("URL") or f"https://doi.org/{clean_doi}", "OK"
         return None, None, f"HTTP {response.status_code}"
     except Exception as e:
-        return None, None, f"Exception: {str(e)}"
+        return None, None, str(e)
 
 def search_crossref_by_text(title, author=None):
     if not title: return None, "Empty Title"
-    params = {'query.bibliographic': title, 'rows': 1, 'select': 'title,URL,DOI,score'}
-    if author and len(title) < 20:
-        params['query.author'] = author
-    
+    params = {'query.bibliographic': title, 'rows': 1, 'select': 'title,URL,DOI'}
     data, status = _call_external_api_with_retry("https://api.crossref.org/works", params, "Crossref-Text")
     if status != "OK": return None, status
     
@@ -92,17 +87,15 @@ def search_crossref_by_text(title, author=None):
         res_title = item.get('title', [''])[0]
         if _is_match(title, res_title):
             return item.get('URL') or f"https://doi.org/{item.get('DOI')}", "OK"
-        return None, "Match score below threshold"
-    return None, "No results found"
+        return None, "Match failed (Below Threshold)"
+    return None, "Not Found"
 
 # ========== 2. Scopus ==========
 def search_scopus_by_title(title, api_key):
     if not api_key: return None, "No API Key"
-    if not title: return None, "Empty Title"
     base_url = "https://api.elsevier.com/content/search/scopus"
     headers = {"Accept": "application/json", "X-ELS-APIKey": api_key}
-    clean_q = title.replace('"', '').replace(':', ' ')
-    params = {"query": f'TITLE("{clean_q}")', "count": 1}
+    params = {"query": f'TITLE("{title}")', "count": 1}
     
     data, status = _call_external_api_with_retry(base_url, params, "Scopus")
     if status != "OK": return None, status
@@ -111,110 +104,109 @@ def search_scopus_by_title(title, api_key):
         entries = data.get('search-results', {}).get('entry', [])
         if entries and 'error' not in entries[0]:
             return entries[0].get('prism:url', 'https://www.scopus.com'), "OK"
-        return None, "Title not found in Scopus"
-    return None, "Empty response"
+    return None, "Not Found"
 
 # ========== 3. Google Scholar (SerpAPI) ==========
-def search_scholar_by_title(title, api_key, threshold=0.85):
+def search_scholar_by_title(title, api_key):
     if not api_key: return None, "No API Key"
-    if not title: return None, "Empty Title"
-    
     params = {"engine": "google_scholar", "q": title, "api_key": api_key, "num": 3}
     try:
         results = GoogleSearch(params).get_dict()
         if "error" in results: return None, f"SerpAPI Error: {results['error']}"
         
         organic = results.get("organic_results", [])
-        if not organic: return None, "No organic results"
-        
-        cleaned_query = clean_title(title)
         for result in organic:
             res_title = result.get("title", "")
-            res_link = result.get("link")
-            cleaned_res = clean_title(res_title)
-            if cleaned_query == cleaned_res: return res_link, "match"
-            if SequenceMatcher(None, cleaned_query, cleaned_res).ratio() >= threshold:
-                return res_link, "similar"
-        return None, "No similar titles found"
+            if _is_match(title, res_title):
+                return result.get("link"), "match"
+        return None, "No exact match found"
     except Exception as e:
         return None, f"Exception: {str(e)}"
 
 def search_scholar_by_ref_text(ref_text, api_key, target_title=None):
-    """
-    補救搜尋：增加標題二次驗證，避免回傳不相關的論文。
-    """
-    if not api_key or not ref_text: 
-        return None, "No input"
-    
+    if not api_key: return None, "No API Key"
     params = {"engine": "google_scholar", "q": ref_text, "api_key": api_key, "num": 1}
     try:
         results = GoogleSearch(params).get_dict()
         organic = results.get("organic_results", [])
-        
         if organic:
             res_title = organic[0].get("title", "")
-            res_link = organic[0].get("link")
-            
-            # 如果有提供目標標題，進行相似度檢查
-            if target_title:
-                c_target = clean_title(target_title)
-                c_res = clean_title(res_title)
-                similarity = SequenceMatcher(None, c_target, c_res).ratio()
-                
-                # 門檻設在 0.6，避免像圖二那種標題完全不同的論文過關
-                if similarity < 0.6:
-                    return None, f"Similar result found but title mismatch ({similarity:.2f})"
-            
-            return res_link, "similar"
-    except Exception as e:
-        return None, f"Exception: {str(e)}"
-    
+            # 補救搜尋也要過比對，避免抓到不相干的論文
+            if target_title and not _is_match(target_title, res_title):
+                return None, "Title mismatch in fallback"
+            return organic[0].get("link"), "similar"
+    except: pass
     return None, "No results"
 
 # ========== 4. Semantic Scholar ==========
 def search_s2_by_title(title, author=None):
-    if not title: return None, "Empty Title"
     params = {'query': title, 'limit': 1, 'fields': 'title,url'}
     data, status = _call_external_api_with_retry(S2_API_URL, params, "S2")
-    if status != "OK": return None, status
-    
-    if data and data.get('data'):
+    if status == "OK" and data.get('data'):
         match = data['data'][0]
-        if _is_match(title, match.get('title')): return match.get('url'), "OK"
-        return None, "Similarity below threshold"
-    return None, "Not Found"
+        if _is_match(title, match.get('title')):
+            return match.get('url'), "OK"
+    return None, status
 
 # ========== 5. OpenAlex ==========
+# modules/api_clients.py 中的 OpenAlex 部分
+
 def search_openalex_by_title(title, author=None):
     if not title: return None, "Empty Title"
-    params = {'search': title, 'per_page': 1, 'select': 'title,doi,id'}
+    params = {'search': title, 'per_page': 1, 'select': 'title,doi,id,ids'}
     data, status = _call_external_api_with_retry(OPENALEX_API_URL, params, "OpenAlex")
+    
     if status != "OK": return None, status
     
     if data and data.get('results'):
         match = data['results'][0]
         if _is_match(title, match.get('title')):
-            return (match.get('doi') or match.get('id')), "OK"
-        return None, "Similarity below threshold"
+            # 優先順序：DOI -> OpenAlex ID 網址 -> 原始 ID
+            doi = match.get('doi')
+            if doi:
+                return doi, "OK"
+            
+            # 如果沒有 DOI，嘗試抓取 OpenAlex 自己的展示頁面連結
+            oa_id = match.get('id')
+            if oa_id:
+                # OpenAlex ID 通常是 https://openalex.org/W... 格式，可以直接點擊
+                return oa_id, "OK"
+                
+            return None, "OK" # 標題對了但真的沒連結
     return None, "Not Found"
 
+# ========== 核心比對邏輯 (超嚴格版) ==========
 def _is_match(query, result):
     if not query or not result: return False
     c_q = clean_title(query)
     c_r = clean_title(result)
-    if c_q in c_r or c_r in c_q:
-        len_diff = abs(len(c_q) - len(c_r))
-        if len_diff / max(len(c_q), len(c_r)) < 0.4: return True
-    return SequenceMatcher(None, c_q, c_r).ratio() >= TITLE_SIMILARITY_THRESHOLD
+    
+    # 1. 計算相似度
+    ratio = SequenceMatcher(None, c_q, c_r).ratio()
+    
+    # 2. 核心關鍵字檢查 (即便相似度很高，只要重要單字不見了就視為失敗)
+    q_words = set(c_q.split())
+    r_words = set(c_r.split())
+    
+    # 找出 query 中存在但 result 中沒有的單字
+    missing_important = []
+    # 排除掉這些無意義的連接詞
+    stop_words = {'a', 'an', 'the', 'of', 'in', 'for', 'with', 'on', 'at', 'by', 'and', 'model', 'based', 'using'}
+    
+    for word in q_words:
+        if word not in stop_words and word not in r_words:
+            missing_important.append(word)
+
+    # 只要有一個核心關鍵字 (如 "time", "series") 沒對上，就回傳 False
+    if missing_important:
+        return False
+
+    return ratio >= TITLE_SIMILARITY_THRESHOLD
 
 def check_url_availability(url):
     if not url or not url.startswith("http"): return False
-    headers = {'User-Agent': 'Mozilla/5.0'}
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     try:
-        response = requests.head(url, headers=headers, timeout=5, allow_redirects=True, verify=False)
-        if 200 <= response.status_code < 400: return True
-        response = requests.get(url, headers=headers, timeout=8, stream=True, verify=False)
-        if 200 <= response.status_code < 400: return True
-    except: pass
-    return False
+        response = requests.head(url, timeout=5, allow_redirects=True, verify=False)
+        return 200 <= response.status_code < 400
+    except: return False
