@@ -182,7 +182,6 @@ with tab1:
                 raw_list, struct_list = parse_references_with_anystyle(raw_input)
             if struct_list:
                 st.session_state.structured_references = struct_list
-                print(struct_list)
                 st.success(f"✅ 解析成功！共 {len(struct_list)} 筆。")
             else:
                 st.error("❌ AnyStyle 本機解析失敗，請確認 Ruby / anystyle-cli 是否正確安裝。")
@@ -255,14 +254,21 @@ with tab2:
                         return res
                     res["debug_logs"]["Scopus"] = status
 
-                # Step 3: OpenAlex
+                # app.py 內部的 check_single_sequential 修改
+
+    # Step 3: OpenAlex
                 if check_openalex and title:
                     url, status = search_openalex_by_title(title, first_author)
-                    if url:
+                    res["debug_logs"]["OpenAlex"] = status
+                    
+                    # 只要狀態是 OK 且 url 不是 None，就視為成功
+                    if status == "OK" and url:
                         res["sources"]["OpenAlex"] = url
                         res["found_at_step"] = "3. OpenAlex"
                         return res
-                    res["debug_logs"]["OpenAlex"] = status
+                    elif status == "OK":
+                        # 這是標題對了但資料庫沒給連結的極端情況
+                        res["debug_logs"]["OpenAlex"] = "OK (但資料庫無連結資源)"
 
                 # Step 4: Semantic Scholar
                 if check_s2 and title:
