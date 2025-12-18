@@ -211,7 +211,7 @@ with tab2:
                     auth_raw = ref['authors'].split(';')[0].split(',')[0]
                     first_author = auth_raw[:20].strip()
 
-                # 初始化結果字典，加入 debug_logs
+                # 初始化結果字典
                 res = {
                     "id": idx, "title": title, "text": text, "parsed": ref,
                     "sources": {}, "found_at_step": None, "debug_logs": {} 
@@ -231,7 +231,8 @@ with tab2:
                 # Step 1: Crossref
                 if check_crossref:
                     if doi:
-                        _, url, status = search_crossref_by_doi(doi)
+                        # 🟡 微調點：加入 target_title 確保 DOI 對應正確
+                        _, url, status = search_crossref_by_doi(doi, target_title=title)
                         if url:
                             res["sources"]["Crossref"] = url
                             res["found_at_step"] = "1. Crossref (DOI)"
@@ -254,20 +255,17 @@ with tab2:
                         return res
                     res["debug_logs"]["Scopus"] = status
 
-                # app.py 內部的 check_single_sequential 修改
-
-    # Step 3: OpenAlex
+                # Step 3: OpenAlex (🟡 核心邏輯微調點)
                 if check_openalex and title:
                     url, status = search_openalex_by_title(title, first_author)
                     res["debug_logs"]["OpenAlex"] = status
                     
-                    # 只要狀態是 OK 且 url 不是 None，就視為成功
+                    # 只要狀態是 OK 且有 url 就視為成功，確保歸類在綠色標籤區
                     if status == "OK" and url:
                         res["sources"]["OpenAlex"] = url
                         res["found_at_step"] = "3. OpenAlex"
                         return res
                     elif status == "OK":
-                        # 這是標題對了但資料庫沒給連結的極端情況
                         res["debug_logs"]["OpenAlex"] = "OK (但資料庫無連結資源)"
 
                 # Step 4: Semantic Scholar
@@ -296,7 +294,7 @@ with tab2:
                         return res
                     res["debug_logs"]["Scholar (Text)"] = status_r
 
-                # Step 6: Website Check (不在此回傳 debug，維持原邏輯)
+                # Step 6: Website Check
                 if parsed_url and parsed_url.startswith('http'):
                     is_doi_link = 'doi.org' in parsed_url or re.search(r'10\.\d{4}/', parsed_url)
                     if not is_doi_link:
@@ -404,7 +402,6 @@ with tab2:
                             else: st.markdown(f"- **{src}**: {link}")
                     else:
                         st.error("⚠️ 在所有啟用的資料庫中皆未找到匹配項。")
-                        # 新增 debug_logs 顯示區塊
                         with st.expander("🔍 查看每個資料庫的詳細失敗原因 (Debug Logs)"):
                             if res.get("debug_logs"):
                                 for api, msg in res["debug_logs"].items():
