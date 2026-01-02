@@ -12,7 +12,7 @@ import os
 # ==============================================================================
 
 # 🔴 請確保此路徑與你電腦中的 ruby.exe 位置一致
-RUBY_EXE = r"C:\Ruby34-x64\bin\ruby.exe"
+RUBY_EXE = r"C:\Ruby34\bin\ruby.exe"
 
 def parse_references_with_anystyle(raw_text_for_anystyle):
     """
