@@ -12,7 +12,7 @@ import os
 # ==============================================================================
 
 # 🔴 請確保此路徑與你電腦中的 ruby.exe 位置一致
-RUBY_EXE = r"C:\Ruby34\bin\ruby.exe"
+RUBY_EXE = "ruby"
 
 def parse_references_with_anystyle(raw_text_for_anystyle):
     """
@@ -165,4 +165,5 @@ def clean_title_for_remedial(text):
         for ch in text
         if unicodedata.category(ch)[0] in ("L", "N", "Z")
     ]
+
     return re.sub(r"\s+", " ", "".join(cleaned)).strip()
