@@ -1,5 +1,12 @@
 # app.py
+import os
+import subprocess
 
+# 檢查 anystyle 是否已安裝，沒安裝就裝它
+try:
+    subprocess.run(["anystyle", "--version"], check=True)
+except:
+    os.system("gem install anystyle-cli")
 import streamlit as st
 import pandas as pd
 import time
