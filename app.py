@@ -14,12 +14,15 @@ import streamlit as st
 # --- 自動環境修復邏輯 ---
 def ensure_anystyle_installed():
     try:
-        # 檢查是否能執行 anystyle
+        # 檢查 anystyle 指令是否可用
         subprocess.run(["ruby", "-S", "anystyle", "--version"], capture_output=True, check=True)
     except:
-        # 如果失敗，代表還沒裝套件，直接安裝
-        with st.spinner("正在初始化 AnyStyle 環境，這可能需要一分鐘..."):
-            os.system("gem install anystyle-cli")
+        with st.spinner("正在初始化 AnyStyle 環境..."):
+            # 使用 --user-install 避開權限問題
+            os.system("gem install anystyle-cli --user-install")
+            # 將 User gem path 加入環境變數，否則系統會找不到指令
+            user_gem_path = subprocess.getoutput("ruby -e 'print Gem.user_dir'") + "/bin"
+            os.environ["PATH"] += os.pathsep + user_gem_path
 
 ensure_anystyle_installed()
 
