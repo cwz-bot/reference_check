@@ -287,12 +287,17 @@ with tab2:
                             return res
                         res["debug_logs"]["Scholar (Title)"] = status
                     
+                    # ▼▼▼▼▼ 修改開始 ▼▼▼▼▼
+                    # 原本的補救搜尋邏輯 (舊版會直接 return res，現在改掉)
                     url_r, status_r = search_scholar_by_ref_text(text, serpapi_key, target_title=title)
                     if url_r:
-                        res["sources"]["Google Scholar (補救)"] = url_r
-                        res["found_at_step"] = "5. Scholar (Text)"
-                        return res
-                    res["debug_logs"]["Scholar (Text)"] = status_r
+                        # [變更點] 不再視為 "sources" (驗證成功)，而是存入 "suggestion"
+                        res["suggestion"] = url_r
+                        res["debug_logs"]["Scholar (Suggestion)"] = "找到相似結果，但因輸入有誤未列入驗證成功"
+                        # [重要] 這裡移除了 return res，讓程式繼續往下跑
+                        # 這樣如果後面 Step 6 網站檢查也沒過，最終狀態就會是 "❌ 未找到"
+                    else:
+                        res["debug_logs"]["Scholar (Text)"] = status_r
 
                 # Step 6: Website Check
                 if parsed_url and parsed_url.startswith('http'):
@@ -392,6 +397,14 @@ with tab2:
                     st.divider()
                     st.markdown("**📜 原始文獻:**")
                     st.markdown(f"<div class='ref-box'>{res['text']}</div>", unsafe_allow_html=True)
+                    
+                    # ▼▼▼▼▼ 新增這段程式碼 ▼▼▼▼▼
+                    if res.get("suggestion"):
+                        st.warning("💡 **輸入可能有誤，系統建議：**")
+                        st.markdown(f"系統在模糊搜尋中找到了相似文獻，請確認您是否是指：\n\n👉 **[點擊查看 Google Scholar 建議結果]({res['suggestion']})**")
+                        st.caption("注意：此文獻因原始輸入標題/格式不精確，未被標記為「驗證成功」。")
+                        st.divider() # 加個分隔線美觀一點
+                    # ▲▲▲▲▲ 新增結束 ▲▲▲▲▲
                     
                     if res['sources']:
                         st.write("**🔗 驗證來源連結：**")
