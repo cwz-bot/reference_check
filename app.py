@@ -1,17 +1,4 @@
-# app.py
-import os
-import subprocess
-
-import os
-import subprocess
-
-# 在啟動時確認 anystyle 核心組件已就緒
-try:
-    subprocess.run(["ruby", "-S", "anystyle", "--version"], check=True)
-except:
-    # 如果系統還沒裝好 gem，這行會由 packages.txt 輔助完成環境
-    pass
-    
+# app.py    
 import streamlit as st
 import pandas as pd
 import time
@@ -19,6 +6,22 @@ import os
 import re
 import ast 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import os
+import subprocess
+import streamlit as st
+
+# --- 自動環境修復邏輯 ---
+def ensure_anystyle_installed():
+    try:
+        # 檢查是否能執行 anystyle
+        subprocess.run(["ruby", "-S", "anystyle", "--version"], capture_output=True, check=True)
+    except:
+        # 如果失敗，代表還沒裝套件，直接安裝
+        with st.spinner("正在初始化 AnyStyle 環境，這可能需要一分鐘..."):
+            os.system("gem install anystyle-cli")
+
+ensure_anystyle_installed()
 
 # 導入自定義模組
 from modules.parsers import parse_references_with_anystyle
