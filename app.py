@@ -18,6 +18,7 @@ from modules.api_clients import (
     search_crossref_by_text,
     search_scopus_by_title,
     search_scholar_by_title,
+    search_scholar_by_ref_text,
     search_s2_by_title,
     search_openalex_by_title,
     check_url_availability
@@ -236,7 +237,19 @@ with tab2:
                             res["sources"][step_name.split(". ")[1]] = url
                             res["found_at_step"] = step_name
                             return res
-                    except: pass
+                        res["debug_logs"]["Scholar (Title)"] = status
+                    
+                    # ▼▼▼▼▼ 修改開始 ▼▼▼▼▼
+                    # 原本的補救搜尋邏輯 (舊版會直接 return res，現在改掉)
+                    url_r, status_r = search_scholar_by_ref_text(text, serpapi_key, target_title=title)
+                    if url_r:
+                        # [變更點] 不再視為 "sources" (驗證成功)，而是存入 "suggestion"
+                        res["suggestion"] = url_r
+                        res["debug_logs"]["Scholar (Suggestion)"] = "找到相似結果，但因輸入有誤未列入驗證成功"
+                        # [重要] 這裡移除了 return res，讓程式繼續往下跑
+                        # 這樣如果後面 Step 6 網站檢查也沒過，最終狀態就會是 "❌ 未找到"
+                    else:
+                        res["debug_logs"]["Scholar (Text)"] = status_r
 
                 # Step 5: Website URL Check
                 if parsed_url and parsed_url.startswith('http'):
@@ -280,20 +293,79 @@ with tab2:
                 st.markdown(f'<div style="background:{bg_color}; padding:10px; border-radius:5px;"><b>驗證狀態:</b> {found_step if is_found else "未找到匹配"}</div>', unsafe_allow_html=True)
                 
                 st.markdown(f"""
-                | 欄位 | 內容 |
-                | :--- | :--- |
-                | **👥 作者** | `{p.get('authors', 'N/A')}` |
-                | **📅 年份** | `{p.get('date', 'N/A')}` |
-                | **📰 標題** | `{p.get('title', 'N/A')}` |
-                | **🏢 出處** | `{p.get('journal', p.get('publisher', 'N/A'))}` |
-                """)
+                <div style="padding-top: 10px;">
+                    <span class="status-badge" style="background:#D1FAE5; color:#065F46;">📚 資料庫: {verified_db_count}</span>
+                    <span class="status-badge" style="background:#DBEAFE; color:#1E40AF;">🌐 有效網站: {valid_web_count}</span>
+                    <span class="status-badge" style="background:#FEF3C7; color:#92400E;">⚠️ 網站(Fail): {failed_web_count}</span>
+                    <span class="status-badge" style="background:#FEE2E2; color:#991B1B;">❌ 未找到: {unverified_count}</span>
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.divider()
+
+            for res in st.session_state.results:
+                found_step = res.get('found_at_step')
+                is_db_verified = found_step and "Website" not in found_step
+                is_web_valid = found_step == "6. Website / Direct URL"
+                is_web_failed = found_step == "6. Website (Link Failed)"
                 
-                st.markdown("**📜 原始文字:**")
-                st.markdown(f"<div class='ref-box'>{res['text']}</div>", unsafe_allow_html=True)
+                if filter_option == "✅ 資料庫驗證" and not is_db_verified: continue
+                if filter_option == "🌐 網站有效來源" and not is_web_valid: continue
+                if filter_option == "⚠️ 網站 (連線失敗)" and not is_web_failed: continue
+                if filter_option == "❌ 未找到結果" and (is_db_verified or is_web_valid or is_web_failed): continue
+
+                bg_color = "#FEE2E2"
+                if is_db_verified: bg_color = "#D1FAE5"
+                elif is_web_valid: bg_color = "#DBEAFE"
+                elif is_web_failed: bg_color = "#FEF3C7"
                 
-                if res['sources']:
-                    for src, link in res['sources'].items():
-                        st.markdown(f"- **{src}**: [{link}]({link})")
+                status_label = f"✅ {found_step}" if is_db_verified else (f"🌐 {found_step}" if is_web_valid else (f"⚠️ {found_step}" if is_web_failed else "❌ 未找到"))
+                
+                p = res.get('parsed', {})
+                with st.expander(f"{res['id']}. {p.get('title', '無標題')[:80]}..."):
+                    st.markdown(f"""<div style="background-color: {bg_color}; padding: 10px; border-radius: 5px; margin-bottom: 15px;"><b>狀態:</b> {status_label}</div>""", unsafe_allow_html=True)
+                    
+                    display_author = p.get('authors') or (f"{p['editor']} (Ed.)" if p.get('editor') else "N/A")
+                    display_title = p.get('title', 'N/A') + (f" {p['edition']}" if p.get('edition') else "")
+                    source_parts = [x for x in [p.get('container-title'), p.get('journal'), f"{p.get('location')}: {p.get('publisher')}" if p.get('publisher') else p.get('publisher')] if x]
+                    display_source = ", ".join(source_parts) if source_parts else "N/A"
+                    
+                    st.markdown(f"""
+                    | | |
+                    | :--- | :--- |
+                    | **👥 作者/編者** | `{display_author}` |
+                    | **📅 發表年份** | `{p.get('date', 'N/A')}` |
+                    | **📰 文獻標題** | `{display_title}` |
+                    | **🏢 出處/發行** | `{display_source}` |
+                    | **🔢 DOI/URL** | `{p.get('doi', p.get('url', 'N/A'))}` |
+                    """)
+                    st.divider()
+                    st.markdown("**📜 原始文獻:**")
+                    st.markdown(f"<div class='ref-box'>{res['text']}</div>", unsafe_allow_html=True)
+                    
+                    # ▼▼▼▼▼ 新增這段程式碼 ▼▼▼▼▼
+                    if res.get("suggestion"):
+                        st.warning("💡 **輸入可能有誤，系統建議：**")
+                        st.markdown(f"系統在模糊搜尋中找到了相似文獻，請確認您是否是指：\n\n👉 **[點擊查看 Google Scholar 建議結果]({res['suggestion']})**")
+                        st.caption("注意：此文獻因原始輸入標題/格式不精確，未被標記為「驗證成功」。")
+                        st.divider() # 加個分隔線美觀一點
+                    # ▲▲▲▲▲ 新增結束 ▲▲▲▲▲
+                    
+                    if res['sources']:
+                        st.write("**🔗 驗證來源連結：**")
+                        for src, link in res['sources'].items():
+                            if src == "Direct Link": st.markdown(f"- 🌐 **原始網站 (已測試可連線)**: [點擊前往]({link})")
+                            elif src == "Direct Link (Dead)": st.markdown(f"- ⚠️ **原始網站 (連線逾時/失敗，請手動確認)**: [點擊前往]({link})")
+                            elif link.startswith("http"): st.markdown(f"- **{src}**: [點擊開啟]({link})")
+                            else: st.markdown(f"- **{src}**: {link}")
+                    else:
+                        st.error("⚠️ 在所有啟用的資料庫中皆未找到匹配項。")
+                        with st.expander("🔍 查看每個資料庫的詳細失敗原因 (Debug Logs)"):
+                            if res.get("debug_logs"):
+                                for api, msg in res["debug_logs"].items():
+                                    st.write(f"**{api}**: {msg}")
+                            else:
+                                st.write("沒有可用的診斷記錄。")
 
 with tab3:
     if st.session_state.results:
