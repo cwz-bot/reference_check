@@ -1,5 +1,3 @@
-# app.py
-
 import streamlit as st
 import pandas as pd
 import time
@@ -20,14 +18,13 @@ from modules.api_clients import (
     search_crossref_by_text,
     search_scopus_by_title,
     search_scholar_by_title,
-    search_scholar_by_ref_text,
     search_s2_by_title,
     search_openalex_by_title,
     check_url_availability
 )
 
 # ========== 頁面設定 ==========
-st.set_page_config(page_title="學術引用檢查器 (Debug 版)", page_icon="📚", layout="wide")
+st.set_page_config(page_title="學術引用檢查器 (系統增強版)", page_icon="📚", layout="wide")
 
 st.markdown("""
 <style>
@@ -51,7 +48,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-header">📚 學術引用檢查器 (API 診斷增強版)</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">📚 學術引用檢查器 (解析補救增強版)</div>', unsafe_allow_html=True)
 
 # ========== Session State ==========
 if "structured_references" not in st.session_state: st.session_state.structured_references = []
@@ -80,55 +77,42 @@ def format_name_field(data):
     except:
         return str(data)
 
-# ========== [核心修改] 2. 資料清洗與拆分修正 ==========
+# ========== [核心補救] 2. 資料清洗與標題提取修正 ==========
 def refine_parsed_data(parsed_item):
     item = parsed_item.copy()
+    raw_text = item.get('text', '').strip()
+
+    # 基礎符號清洗
     for key in ['doi', 'url', 'title', 'date']:
         if item.get(key) and isinstance(item[key], str):
             item[key] = item[key].strip(' ,.;)]}>')
 
+    # --- [核心補救：處理 StyleTTS 2 / AIOS 等格式] ---
+    title = item.get('title', '')
+    
+    # 如果標題沒抓到，或是被誤判為縮寫 (長度太短)
+    if not title or len(title) < 10:
+        # 模式 A: 針對 "縮寫: 完整標題" (如 AIOS: LLM Agent...)
+        # 匹配開頭是 2-12 個字元，緊接冒號，抓取到下一個分隔符
+        abbr_match = re.search(r'^([A-Z0-9\-\.\s]{2,12}:\s*.+?)(?=\s*[,\[]|\s*Available|\s*\(|\bhttps?://|\.|$)', raw_text)
+        if abbr_match:
+            item['title'] = abbr_match.group(1).strip()
+        else:
+            # 模式 B: AnyStyle 把標題誤判為出版商或期刊
+            for backup_key in ['publisher', 'container-title', 'journal']:
+                val = item.get(backup_key)
+                if val and len(str(val)) > 15:
+                    item['title'] = str(val).strip()
+                    break
+
+    # DOI 提取邏輯
     url_val = item.get('url', '')
     if url_val:
         doi_match = re.search(r'(10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+)', url_val)
         if doi_match:
-            extracted_doi = doi_match.group(1).strip('.')
-            item['doi'] = extracted_doi
-            if 'doi.org' in url_val or url_val.replace('http://', '').startswith(extracted_doi):
-                item['url'] = None
-    
-    title = item.get('title', '')
-    garbage_fields = ['publisher', 'container-title', 'journal', 'date', 'location', 'note']
-    candidate_text = ""
+            item['doi'] = doi_match.group(1).strip('.')
 
-    if not title or len(title) < 5:
-        for field in garbage_fields:
-            val = item.get(field)
-            if val and isinstance(val, str) and len(val) > 10:
-                if re.search(r'\d{4}.*?[)\]]\.?\s', val) or "RFC" in val:
-                    candidate_text = val
-                    break
-        
-        if candidate_text:
-            match_a = re.search(r'\d{4}.*?[)\]]\.?\s*(.*?)(?=\s*[\(\[]RFC|\s*[\(\[]Online|\s*Avail|\s*$)', candidate_text, re.IGNORECASE)
-            if match_a:
-                extracted_title = match_a.group(1).strip()
-                if len(extracted_title) > 3:
-                    item['title'] = extracted_title
-            elif "RFC" in candidate_text:
-                parts = candidate_text.split("RFC")
-                potential_title = parts[0]
-                potential_title = re.sub(r'[\(\[]$', '', potential_title).strip()
-                potential_title = re.sub(r'^.*?\d{4}.*?[)\]]\.?\s*', '', potential_title).strip()
-                if len(potential_title) > 5:
-                    item['title'] = potential_title
-
-    if item.get('edition') and not item.get('publisher'):
-        ed_text = item['edition']
-        match = re.search(r'^([(\[]?.*?(?:ed\.|edition|edn)[)\]]?)\s*[:.,]?\s*(.+)$', ed_text, re.IGNORECASE)
-        if match:
-            item['edition'] = match.group(1).strip()
-            item['publisher'] = match.group(2).strip(' .,')
-    
+    # 處理人名
     if item.get('authors'): item['authors'] = format_name_field(item['authors'])
     if item.get('editor'): item['editor'] = format_name_field(item['editor'])
     
@@ -137,7 +121,6 @@ def refine_parsed_data(parsed_item):
 # ========== 側邊欄 ==========
 with st.sidebar:
     st.header("⚙️ 設定")
-    st.subheader("📂 本地資料庫")
     DEFAULT_CSV_PATH = "112ndltd.csv"
     local_df = None
     target_col = None
@@ -146,51 +129,41 @@ with st.sidebar:
         def read_data_cached(file): return load_csv_data(file)
         local_df = read_data_cached(DEFAULT_CSV_PATH)
         if local_df is not None:
-            st.success(f"✅ 已載入: {len(local_df)} 筆")
-            default_idx = 0
-            if "論文名稱" in local_df.columns: default_idx = list(local_df.columns).index("論文名稱")
-            target_col = st.selectbox("比對欄位:", options=local_df.columns, index=default_idx, disabled=True)
-    else:
-        st.error(f"❌ 錯誤：找不到 {DEFAULT_CSV_PATH}")
+            st.success(f"✅ 已載入本地庫: {len(local_df)} 筆")
+            target_col = "論文名稱" if "論文名稱" in local_df.columns else local_df.columns[0]
     
     st.divider()
     scopus_key = get_scopus_key()
     serpapi_key = get_serpapi_key()
-    st.info(f"Scopus API: {'✅ 已載入' if scopus_key else '❌ 未設定'}")
-    st.info(f"SerpAPI: {'✅ 已載入' if serpapi_key else '❌ 未設定'}")
-    
-    check_crossref = True
-    check_scopus = True
-    check_openalex = True
-    check_s2 = True
-    check_scholar = True
+    st.info(f"Scopus API: {'✅' if scopus_key else '❌'}")
+    st.info(f"SerpAPI: {'✅' if serpapi_key else '❌'}")
 
-# ========== 主邏輯 ==========
-tab1, tab2, tab3 = st.tabs(["📝 輸入與解析", "🔍 驗證結果", "📊 統計報告"])
+# ========== 主頁面 ==========
+tab1, tab2, tab3 = st.tabs(["📝 輸入解析", "🔍 驗證結果", "📊 統計報告"])
 
 with tab1:
     st.subheader("貼上參考文獻列表")
-    raw_input = st.text_area("在此貼上內容...", height=300)
+    raw_input = st.text_area("在此輸入文獻內容...", height=300, placeholder="例如: StyleTTS 2: Towards Human-Level Text-to-Speech...")
     
-    if st.button("🚀 使用 AnyStyle 解析", type="primary"):
+    if st.button("🚀 開始解析", type="primary"):
         if not raw_input:
             st.warning("請先輸入文字")
         else:
             st.session_state.structured_references = []
             st.session_state.results = []
-            with st.spinner("正在呼叫 Docker 容器進行解析..."):
-                raw_list, struct_list = parse_references_with_anystyle(raw_input)
+            with st.spinner("AnyStyle 解析中..."):
+                _, struct_list = parse_references_with_anystyle(raw_input)
             if struct_list:
                 st.session_state.structured_references = struct_list
                 st.success(f"✅ 解析成功！共 {len(struct_list)} 筆。")
             else:
-                st.error("❌ AnyStyle 本機解析失敗，請確認 Ruby / anystyle-cli 是否正確安裝。")
+                st.error("❌ AnyStyle 解析異常。")
 
 with tab2:
     if not st.session_state.structured_references:
-        st.info("請先在第一頁輸入並解析文獻。")
+        st.info("請先在第一頁解析文獻。")
     else:
-        if st.button("🔍 開始驗證所有文獻 (循序模式)", type="primary"):
+        if st.button("🔍 開始全自動驗證 (併發模式)", type="primary"):
             st.session_state.results = []
             progress = st.progress(0)
             status_text = st.empty()
@@ -199,238 +172,137 @@ with tab2:
             total = len(refs)
             results_buffer = []
 
-            def check_single_sequential(idx, raw_ref):
+            def check_single_task(idx, raw_ref):
+                # 1. 解析補救
                 ref = refine_parsed_data(raw_ref)
+                
+                # 2. 準備搜索字串 (核心保底)
                 title = ref.get('title', '')
                 text = ref.get('text', '')
+                # 如果標題不存在或太短，直接用整行原始文字的前 120 字去搜索
+                search_query = title if (title and len(title) > 8) else text[:120]
+                
                 doi = ref.get('doi')
                 parsed_url = ref.get('url')
-                
-                first_author = ""
-                if ref.get('authors'):
-                    auth_raw = ref['authors'].split(';')[0].split(',')[0]
-                    first_author = auth_raw[:20].strip()
+                first_author = ref['authors'].split(';')[0].split(',')[0].strip() if ref.get('authors') else ""
 
-                # 初始化結果字典
                 res = {
-                    "id": idx, "title": title, "text": text, "parsed": ref,
+                    "id": idx, "title": title if title else "解析失敗 (使用保底搜索)", 
+                    "text": text, "parsed": ref,
                     "sources": {}, "found_at_step": None, "debug_logs": {} 
                 }
 
-                has_chinese = bool(re.search(r'[\u4e00-\u9fff]', title)) if title else False
-
-                # Step 0: Local DB
-                if has_chinese and local_df is not None and target_col and title:
+                # Step 0: Local DB (針對中文)
+                has_chinese = bool(re.search(r'[\u4e00-\u9fff]', search_query))
+                if has_chinese and local_df is not None and title:
                     match_row, score = search_local_database(local_df, target_col, title, threshold=0.85)
                     if match_row is not None:
-                        res["sources"]["Local DB"] = "本地資料庫匹配成功"
+                        res["sources"]["Local DB"] = "匹配成功"
                         res["found_at_step"] = "0. Local Database"
                         return res
-                    res["debug_logs"]["Local DB"] = f"未找到 (最高相似度: {score:.2f})"
 
-                # Step 1: Crossref
-                if check_crossref:
-                    if doi:
-                        # 🟡 微調點：加入 target_title 確保 DOI 對應正確
-                        _, url, status = search_crossref_by_doi(doi, target_title=title)
-                        if url:
-                            res["sources"]["Crossref"] = url
-                            res["found_at_step"] = "1. Crossref (DOI)"
-                            return res
-                        res["debug_logs"]["Crossref (DOI)"] = status
-                    elif title and len(title) > 5:
-                        url, status = search_crossref_by_text(title, first_author)
-                        if url:
-                            res["sources"]["Crossref"] = url
-                            res["found_at_step"] = "1. Crossref (Text)"
-                            return res
-                        res["debug_logs"]["Crossref (Text)"] = status
+                # Step 1: Crossref (DOI)
+                if doi:
+                    _, url, status = search_crossref_by_doi(doi, target_title=title if title else None)
+                    if url:
+                        res["sources"]["Crossref"] = url
+                        res["found_at_step"] = "1. Crossref (DOI)"
+                        return res
+                
+                # Step 2: Crossref (Text Search)
+                url, status = search_crossref_by_text(search_query, first_author)
+                if url:
+                    res["sources"]["Crossref"] = url
+                    res["found_at_step"] = "1. Crossref (Search)"
+                    return res
 
-                # Step 2: Scopus
-                if check_scopus and scopus_key and title:
-                    url, status = search_scopus_by_title(title, scopus_key)
+                # Step 3: Scopus
+                if scopus_key:
+                    url, status = search_scopus_by_title(search_query, scopus_key)
                     if url:
                         res["sources"]["Scopus"] = url
                         res["found_at_step"] = "2. Scopus"
                         return res
-                    res["debug_logs"]["Scopus"] = status
 
-                # Step 3: OpenAlex (🟡 核心邏輯微調點)
-                if check_openalex and title:
-                    url, status = search_openalex_by_title(title, first_author)
-                    res["debug_logs"]["OpenAlex"] = status
-                    
-                    # 只要狀態是 OK 且有 url 就視為成功，確保歸類在綠色標籤區
-                    if status == "OK" and url:
-                        res["sources"]["OpenAlex"] = url
-                        res["found_at_step"] = "3. OpenAlex"
-                        return res
-                    elif status == "OK":
-                        res["debug_logs"]["OpenAlex"] = "OK (但資料庫無連結資源)"
-
-                # Step 4: Semantic Scholar
-                if check_s2 and title:
-                    url, status = search_s2_by_title(title, first_author)
-                    if url:
-                        res["sources"]["Semantic Scholar"] = url
-                        res["found_at_step"] = "4. Semantic Scholar"
-                        return res
-                    res["debug_logs"]["Semantic Scholar"] = status
-
-                # Step 5: Google Scholar
-                if check_scholar and serpapi_key:
-                    if title:
-                        url, status = search_scholar_by_title(title, serpapi_key)
+                # Step 4: OpenAlex / S2 / Scholar
+                for api_func, step_name in [
+                    (lambda: search_openalex_by_title(search_query, first_author), "3. OpenAlex"),
+                    (lambda: search_s2_by_title(search_query, first_author), "4. Semantic Scholar"),
+                    (lambda: search_scholar_by_title(search_query, serpapi_key), "5. Google Scholar")
+                ]:
+                    try:
+                        url, status = api_func()
                         if url:
-                            res["sources"]["Google Scholar"] = url
-                            res["found_at_step"] = "5. Scholar (Title)"
+                            res["sources"][step_name.split(". ")[1]] = url
+                            res["found_at_step"] = step_name
                             return res
-                        res["debug_logs"]["Scholar (Title)"] = status
-                    
-                    url_r, status_r = search_scholar_by_ref_text(text, serpapi_key, target_title=title)
-                    if url_r:
-                        res["sources"]["Google Scholar (補救)"] = url_r
-                        res["found_at_step"] = "5. Scholar (Text)"
-                        return res
-                    res["debug_logs"]["Scholar (Text)"] = status_r
+                    except: pass
 
-                # Step 6: Website Check
+                # Step 5: Website URL Check
                 if parsed_url and parsed_url.startswith('http'):
-                    is_doi_link = 'doi.org' in parsed_url or re.search(r'10\.\d{4}/', parsed_url)
-                    if not is_doi_link:
-                        if check_url_availability(parsed_url):
-                            res["sources"]["Direct Link"] = parsed_url
-                            res["found_at_step"] = "6. Website / Direct URL"
-                            return res
-                        else:
-                            res["sources"]["Direct Link (Dead)"] = parsed_url
-                            res["found_at_step"] = "6. Website (Link Failed)"
-                            return res
-
+                    if check_url_availability(parsed_url):
+                        res["sources"]["Direct Link"] = parsed_url
+                        res["found_at_step"] = "6. Website / Direct URL"
+                    else:
+                        res["sources"]["Direct Link (Dead)"] = parsed_url
+                        res["found_at_step"] = "6. Website (Link Failed)"
+                
                 return res
 
-            max_workers = min(5, total)
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(check_single_sequential, i+1, r): i for i, r in enumerate(refs)}
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {executor.submit(check_single_task, i+1, r): i for i, r in enumerate(refs)}
                 for i, future in enumerate(as_completed(futures)):
-                    try:
-                        data = future.result()
-                        results_buffer.append(data)
-                        progress.progress((i + 1) / total)
-                        status_text.text(f"正在檢查: {i+1}/{total}")
-                    except Exception as e:
-                        st.error(f"Error on item {i}: {e}")
+                    results_buffer.append(future.result())
+                    progress.progress((i + 1) / total)
+                    status_text.text(f"正在檢查: {i+1}/{total}")
 
             st.session_state.results = sorted(results_buffer, key=lambda x: x['id'])
-            status_text.success("✅ 驗證完成！")
-            time.sleep(1)
             st.rerun()
 
-        if st.session_state.results:
-            st.divider()
-            col1, col2 = st.columns([1, 3])
-            with col1:
-                filter_option = st.selectbox(
-                    "📂 篩選顯示結果",
-                    ["全部顯示", "✅ 資料庫驗證", "🌐 網站有效來源", "⚠️ 網站 (連線失敗)", "❌ 未找到結果"],
-                    index=0
-                )
+    # --- 結果展示區 ---
+    if st.session_state.results:
+        st.divider()
+        col_f1, col_f2 = st.columns([1, 2])
+        with col_f1:
+            filter_option = st.selectbox("📂 篩選結果", ["全部顯示", "✅ 已驗證", "❌ 未找到"])
+        
+        for res in st.session_state.results:
+            found_step = res.get('found_at_step')
+            is_found = found_step is not None
             
-            verified_db_count = sum(1 for r in st.session_state.results if r.get('found_at_step') and "Website" not in r.get('found_at_step'))
-            valid_web_count = sum(1 for r in st.session_state.results if r.get('found_at_step') == "6. Website / Direct URL")
-            failed_web_count = sum(1 for r in st.session_state.results if r.get('found_at_step') == "6. Website (Link Failed)")
-            unverified_count = len(st.session_state.results) - (verified_db_count + valid_web_count + failed_web_count)
+            if filter_option == "✅ 已驗證" and not is_found: continue
+            if filter_option == "❌ 未找到" and is_found: continue
+
+            bg_color = "#D1FAE5" if is_found else "#FEE2E2"
+            p = res.get('parsed', {})
             
-            with col2:
+            with st.expander(f"{res['id']}. {p.get('title', '無標題')[:80]}"):
+                st.markdown(f'<div style="background:{bg_color}; padding:10px; border-radius:5px;"><b>驗證狀態:</b> {found_step if is_found else "未找到匹配"}</div>', unsafe_allow_html=True)
+                
                 st.markdown(f"""
-                <div style="padding-top: 10px;">
-                    <span class="status-badge" style="background:#D1FAE5; color:#065F46;">📚 資料庫: {verified_db_count}</span>
-                    <span class="status-badge" style="background:#DBEAFE; color:#1E40AF;">🌐 有效網站: {valid_web_count}</span>
-                    <span class="status-badge" style="background:#FEF3C7; color:#92400E;">⚠️ 網站(Fail): {failed_web_count}</span>
-                    <span class="status-badge" style="background:#FEE2E2; color:#991B1B;">❌ 未找到: {unverified_count}</span>
-                </div>
-                """, unsafe_allow_html=True)
-
-            st.divider()
-
-            for res in st.session_state.results:
-                found_step = res.get('found_at_step')
-                is_db_verified = found_step and "Website" not in found_step
-                is_web_valid = found_step == "6. Website / Direct URL"
-                is_web_failed = found_step == "6. Website (Link Failed)"
+                | 欄位 | 內容 |
+                | :--- | :--- |
+                | **👥 作者** | `{p.get('authors', 'N/A')}` |
+                | **📅 年份** | `{p.get('date', 'N/A')}` |
+                | **📰 標題** | `{p.get('title', 'N/A')}` |
+                | **🏢 出處** | `{p.get('journal', p.get('publisher', 'N/A'))}` |
+                """)
                 
-                if filter_option == "✅ 資料庫驗證" and not is_db_verified: continue
-                if filter_option == "🌐 網站有效來源" and not is_web_valid: continue
-                if filter_option == "⚠️ 網站 (連線失敗)" and not is_web_failed: continue
-                if filter_option == "❌ 未找到結果" and (is_db_verified or is_web_valid or is_web_failed): continue
-
-                bg_color = "#FEE2E2"
-                if is_db_verified: bg_color = "#D1FAE5"
-                elif is_web_valid: bg_color = "#DBEAFE"
-                elif is_web_failed: bg_color = "#FEF3C7"
+                st.markdown("**📜 原始文字:**")
+                st.markdown(f"<div class='ref-box'>{res['text']}</div>", unsafe_allow_html=True)
                 
-                status_label = f"✅ {found_step}" if is_db_verified else (f"🌐 {found_step}" if is_web_valid else (f"⚠️ {found_step}" if is_web_failed else "❌ 未找到"))
-                
-                p = res.get('parsed', {})
-                with st.expander(f"{res['id']}. {p.get('title', '無標題')[:80]}..."):
-                    st.markdown(f"""<div style="background-color: {bg_color}; padding: 10px; border-radius: 5px; margin-bottom: 15px;"><b>狀態:</b> {status_label}</div>""", unsafe_allow_html=True)
-                    
-                    display_author = p.get('authors') or (f"{p['editor']} (Ed.)" if p.get('editor') else "N/A")
-                    display_title = p.get('title', 'N/A') + (f" {p['edition']}" if p.get('edition') else "")
-                    source_parts = [x for x in [p.get('container-title'), p.get('journal'), f"{p.get('location')}: {p.get('publisher')}" if p.get('publisher') else p.get('publisher')] if x]
-                    display_source = ", ".join(source_parts) if source_parts else "N/A"
-                    
-                    st.markdown(f"""
-                    | | |
-                    | :--- | :--- |
-                    | **👥 作者/編者** | `{display_author}` |
-                    | **📅 發表年份** | `{p.get('date', 'N/A')}` |
-                    | **📰 文獻標題** | `{display_title}` |
-                    | **🏢 出處/發行** | `{display_source}` |
-                    | **🔢 DOI/URL** | `{p.get('doi', p.get('url', 'N/A'))}` |
-                    """)
-                    st.divider()
-                    st.markdown("**📜 原始文獻:**")
-                    st.markdown(f"<div class='ref-box'>{res['text']}</div>", unsafe_allow_html=True)
-                    
-                    if res['sources']:
-                        st.write("**🔗 驗證來源連結：**")
-                        for src, link in res['sources'].items():
-                            if src == "Direct Link": st.markdown(f"- 🌐 **原始網站 (已測試可連線)**: [點擊前往]({link})")
-                            elif src == "Direct Link (Dead)": st.markdown(f"- ⚠️ **原始網站 (連線逾時/失敗，請手動確認)**: [點擊前往]({link})")
-                            elif link.startswith("http"): st.markdown(f"- **{src}**: [點擊開啟]({link})")
-                            else: st.markdown(f"- **{src}**: {link}")
-                    else:
-                        st.error("⚠️ 在所有啟用的資料庫中皆未找到匹配項。")
-                        with st.expander("🔍 查看每個資料庫的詳細失敗原因 (Debug Logs)"):
-                            if res.get("debug_logs"):
-                                for api, msg in res["debug_logs"].items():
-                                    st.write(f"**{api}**: {msg}")
-                            else:
-                                st.write("沒有可用的診斷記錄。")
+                if res['sources']:
+                    for src, link in res['sources'].items():
+                        st.markdown(f"- **{src}**: [{link}]({link})")
 
 with tab3:
     if st.session_state.results:
-        df = pd.DataFrame(st.session_state.results)
-        df['Source'] = df['found_at_step'].fillna('Not Found')
-        total = len(df)
-        verified_count = len(df[df['Source'] != 'Not Found'])
-        col1, col2 = st.columns(2)
-        col1.metric("總文獻數", total)
-        col2.metric("已識別來源數 (含網站)", verified_count, f"{verified_count/total*100:.1f}%")
+        df_res = pd.DataFrame(st.session_state.results)
+        st.metric("總查核數", len(df_res))
         st.subheader("驗證來源分佈")
-        st.bar_chart(df['Source'].value_counts())
+        st.bar_chart(df_res['found_at_step'].fillna('Not Found').value_counts())
         
-        st.subheader("詳細資料表")
-        export_data = []
-        for r in st.session_state.results:
-            row = r['parsed'].copy()
-            row['id'] = r['id']
-            row['verified_source'] = r.get('found_at_step', 'Not Found')
-            row['verified_url'] = list(r['sources'].values())[0] if r['sources'] else ''
-            export_data.append(row)
-        st.dataframe(pd.DataFrame(export_data), use_container_width=True)
-        csv = pd.DataFrame(export_data).to_csv(index=False).encode('utf-8-sig')
+        csv = df_res.to_csv(index=False).encode('utf-8-sig')
         st.download_button("📥 下載完整報告 CSV", csv, "report.csv", "text/csv")
     else:
-        st.info("尚無數據")
+        st.info("尚無統計數據")

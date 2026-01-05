@@ -90,6 +90,7 @@ def parse_references_with_anystyle(raw_text_for_anystyle):
                     stdout = match.group(0)
 
             line_data = json.loads(stdout)
+            print(line_data)
 
             for item in line_data:
                 cleaned_item = {}
