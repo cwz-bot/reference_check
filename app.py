@@ -1,3 +1,5 @@
+# app.py 完整融合版
+
 import streamlit as st
 import pandas as pd
 import time
@@ -18,7 +20,7 @@ from modules.api_clients import (
     search_crossref_by_text,
     search_scopus_by_title,
     search_scholar_by_title,
-    search_scholar_by_ref_text,
+    search_scholar_by_ref_text, # 第二段新增
     search_s2_by_title,
     search_openalex_by_title,
     check_url_availability
@@ -49,7 +51,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-header">📚 學術引用檢查器 (解析補救增強版)</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">📚 學術引用檢查器 (解析補救與建議增強版)</div>', unsafe_allow_html=True)
 
 # ========== Session State ==========
 if "structured_references" not in st.session_state: st.session_state.structured_references = []
@@ -88,13 +90,11 @@ def refine_parsed_data(parsed_item):
         if item.get(key) and isinstance(item[key], str):
             item[key] = item[key].strip(' ,.;)]}>')
 
-    # --- [核心補救：處理 StyleTTS 2 / AIOS 等格式] ---
+    # --- [核心補寫：處理 StyleTTS 2 / AIOS 等格式] ---
     title = item.get('title', '')
     
-    # 如果標題沒抓到，或是被誤判為縮寫 (長度太短)
     if not title or len(title) < 10:
-        # 模式 A: 針對 "縮寫: 完整標題" (如 AIOS: LLM Agent...)
-        # 匹配開頭是 2-12 個字元，緊接冒號，抓取到下一個分隔符
+        # 模式 A: 針對 "縮寫: 完整標題"
         abbr_match = re.search(r'^([A-Z0-9\-\.\s]{2,12}:\s*.+?)(?=\s*[,\[]|\s*Available|\s*\(|\bhttps?://|\.|$)', raw_text)
         if abbr_match:
             item['title'] = abbr_match.group(1).strip()
@@ -106,14 +106,13 @@ def refine_parsed_data(parsed_item):
                     item['title'] = str(val).strip()
                     break
 
-    # DOI 提取邏輯
+    # DOI 提取
     url_val = item.get('url', '')
     if url_val:
         doi_match = re.search(r'(10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+)', url_val)
         if doi_match:
             item['doi'] = doi_match.group(1).strip('.')
 
-    # 處理人名
     if item.get('authors'): item['authors'] = format_name_field(item['authors'])
     if item.get('editor'): item['editor'] = format_name_field(item['editor'])
     
@@ -174,13 +173,9 @@ with tab2:
             results_buffer = []
 
             def check_single_task(idx, raw_ref):
-                # 1. 解析補救
                 ref = refine_parsed_data(raw_ref)
-                
-                # 2. 準備搜索字串 (核心保底)
                 title = ref.get('title', '')
                 text = ref.get('text', '')
-                # 如果標題不存在或太短，直接用整行原始文字的前 120 字去搜索
                 search_query = title if (title and len(title) > 8) else text[:120]
                 
                 doi = ref.get('doi')
@@ -190,10 +185,11 @@ with tab2:
                 res = {
                     "id": idx, "title": title if title else "解析失敗 (使用保底搜索)", 
                     "text": text, "parsed": ref,
-                    "sources": {}, "found_at_step": None, "debug_logs": {} 
+                    "sources": {}, "found_at_step": None, "debug_logs": {},
+                    "suggestion": None # 融合建議連結
                 }
 
-                # Step 0: Local DB (針對中文)
+                # Step 0: Local DB
                 has_chinese = bool(re.search(r'[\u4e00-\u9fff]', search_query))
                 if has_chinese and local_df is not None and title:
                     match_row, score = search_local_database(local_df, target_col, title, threshold=0.85)
@@ -202,7 +198,7 @@ with tab2:
                         res["found_at_step"] = "0. Local Database"
                         return res
 
-                # Step 1: Crossref (DOI)
+                # Step 1: Crossref (DOI & Text)
                 if doi:
                     _, url, status = search_crossref_by_doi(doi, target_title=title if title else None)
                     if url:
@@ -210,7 +206,6 @@ with tab2:
                         res["found_at_step"] = "1. Crossref (DOI)"
                         return res
                 
-                # Step 2: Crossref (Text Search)
                 url, status = search_crossref_by_text(search_query, first_author)
                 if url:
                     res["sources"]["Crossref"] = url
@@ -225,7 +220,7 @@ with tab2:
                         res["found_at_step"] = "2. Scopus"
                         return res
 
-                # Step 4: OpenAlex / S2 / Scholar
+                # Step 4: OpenAlex / S2 / Scholar (Title)
                 for api_func, step_name in [
                     (lambda: search_openalex_by_title(search_query, first_author), "3. OpenAlex"),
                     (lambda: search_s2_by_title(search_query, first_author), "4. Semantic Scholar"),
@@ -237,17 +232,15 @@ with tab2:
                             res["sources"][step_name.split(". ")[1]] = url
                             res["found_at_step"] = step_name
                             return res
-                        res["debug_logs"]["Scholar (Title)"] = status
-                    
-                    # ▼▼▼▼▼ 修改開始 ▼▼▼▼▼
-                    # 原本的補救搜尋邏輯 (舊版會直接 return res，現在改掉)
+                        res["debug_logs"][step_name] = status
+                    except: pass
+
+                # 補救機制：Scholar Ref Text (存入 Suggestion)
+                if serpapi_key:
                     url_r, status_r = search_scholar_by_ref_text(text, serpapi_key, target_title=title)
                     if url_r:
-                        # [變更點] 不再視為 "sources" (驗證成功)，而是存入 "suggestion"
                         res["suggestion"] = url_r
-                        res["debug_logs"]["Scholar (Suggestion)"] = "找到相似結果，但因輸入有誤未列入驗證成功"
-                        # [重要] 這裡移除了 return res，讓程式繼續往下跑
-                        # 這樣如果後面 Step 6 網站檢查也沒過，最終狀態就會是 "❌ 未找到"
+                        res["debug_logs"]["Scholar (Suggestion)"] = "找到相似結果但未達驗證標準"
                     else:
                         res["debug_logs"]["Scholar (Text)"] = status_r
 
@@ -275,97 +268,93 @@ with tab2:
     # --- 結果展示區 ---
     if st.session_state.results:
         st.divider()
+        
+        # 融合第二段的進階篩選與統計
+        verified_db_count = sum(1 for r in st.session_state.results if r.get('found_at_step') and "Website" not in r.get('found_at_step'))
+        valid_web_count = sum(1 for r in st.session_state.results if r.get('found_at_step') == "6. Website / Direct URL")
+        failed_web_count = sum(1 for r in st.session_state.results if r.get('found_at_step') == "6. Website (Link Failed)")
+        unverified_count = len(st.session_state.results) - (verified_db_count + valid_web_count + failed_web_count)
+
         col_f1, col_f2 = st.columns([1, 2])
         with col_f1:
-            filter_option = st.selectbox("📂 篩選結果", ["全部顯示", "✅ 已驗證", "❌ 未找到"])
-        
+            filter_option = st.selectbox(
+                "📂 篩選顯示結果",
+                ["全部顯示", "✅ 資料庫驗證", "🌐 網站有效來源", "⚠️ 網站 (連線失敗)", "❌ 未找到結果"],
+                index=0
+            )
+        with col_f2:
+            st.markdown(f"""
+            <div style="padding-top: 10px;">
+                <span class="status-badge" style="background:#D1FAE5; color:#065F46;">📚 資料庫: {verified_db_count}</span>
+                <span class="status-badge" style="background:#DBEAFE; color:#1E40AF;">🌐 有效網站: {valid_web_count}</span>
+                <span class="status-badge" style="background:#FEF3C7; color:#92400E;">⚠️ 網站(Fail): {failed_web_count}</span>
+                <span class="status-badge" style="background:#FEE2E2; color:#991B1B;">❌ 未找到: {unverified_count}</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.divider()
+
         for res in st.session_state.results:
             found_step = res.get('found_at_step')
-            is_found = found_step is not None
+            is_db_verified = found_step and "Website" not in found_step
+            is_web_valid = found_step == "6. Website / Direct URL"
+            is_web_failed = found_step == "6. Website (Link Failed)"
             
-            if filter_option == "✅ 已驗證" and not is_found: continue
-            if filter_option == "❌ 未找到" and is_found: continue
+            # 篩選邏輯融合
+            if filter_option == "✅ 資料庫驗證" and not is_db_verified: continue
+            if filter_option == "🌐 網站有效來源" and not is_web_valid: continue
+            if filter_option == "⚠️ 網站 (連線失敗)" and not is_web_failed: continue
+            if filter_option == "❌ 未找到結果" and (is_db_verified or is_web_valid or is_web_failed): continue
 
-            bg_color = "#D1FAE5" if is_found else "#FEE2E2"
-            p = res.get('parsed', {})
+            bg_color = "#FEE2E2"
+            if is_db_verified: bg_color = "#D1FAE5"
+            elif is_web_valid: bg_color = "#DBEAFE"
+            elif is_web_failed: bg_color = "#FEF3C7"
             
-            with st.expander(f"{res['id']}. {p.get('title', '無標題')[:80]}"):
-                st.markdown(f'<div style="background:{bg_color}; padding:10px; border-radius:5px;"><b>驗證狀態:</b> {found_step if is_found else "未找到匹配"}</div>', unsafe_allow_html=True)
+            status_label = f"✅ {found_step}" if is_db_verified else (f"🌐 {found_step}" if is_web_valid else (f"⚠️ {found_step}" if is_web_failed else "❌ 未找到"))
+            
+            p = res.get('parsed', {})
+            with st.expander(f"{res['id']}. {p.get('title', '無標題')[:80]}..."):
+                st.markdown(f"""<div style="background-color: {bg_color}; padding: 10px; border-radius: 5px; margin-bottom: 15px;"><b>狀態:</b> {status_label}</div>""", unsafe_allow_html=True)
+                
+                display_author = p.get('authors') or (f"{p['editor']} (Ed.)" if p.get('editor') else "N/A")
+                display_title = p.get('title', 'N/A') + (f" {p['edition']}" if p.get('edition') else "")
+                source_parts = [x for x in [p.get('container-title'), p.get('journal'), f"{p.get('location')}: {p.get('publisher')}" if p.get('publisher') else p.get('publisher')] if x]
+                display_source = ", ".join(source_parts) if source_parts else "N/A"
                 
                 st.markdown(f"""
-                <div style="padding-top: 10px;">
-                    <span class="status-badge" style="background:#D1FAE5; color:#065F46;">📚 資料庫: {verified_db_count}</span>
-                    <span class="status-badge" style="background:#DBEAFE; color:#1E40AF;">🌐 有效網站: {valid_web_count}</span>
-                    <span class="status-badge" style="background:#FEF3C7; color:#92400E;">⚠️ 網站(Fail): {failed_web_count}</span>
-                    <span class="status-badge" style="background:#FEE2E2; color:#991B1B;">❌ 未找到: {unverified_count}</span>
-                </div>
-                """, unsafe_allow_html=True)
-
-            st.divider()
-
-            for res in st.session_state.results:
-                found_step = res.get('found_at_step')
-                is_db_verified = found_step and "Website" not in found_step
-                is_web_valid = found_step == "6. Website / Direct URL"
-                is_web_failed = found_step == "6. Website (Link Failed)"
+                | | |
+                | :--- | :--- |
+                | **👥 作者/編者** | `{display_author}` |
+                | **📅 發表年份** | `{p.get('date', 'N/A')}` |
+                | **📰 文獻標題** | `{display_title}` |
+                | **🏢 出處/發行** | `{display_source}` |
+                | **🔢 DOI/URL** | `{p.get('doi', p.get('url', 'N/A'))}` |
+                """)
                 
-                if filter_option == "✅ 資料庫驗證" and not is_db_verified: continue
-                if filter_option == "🌐 網站有效來源" and not is_web_valid: continue
-                if filter_option == "⚠️ 網站 (連線失敗)" and not is_web_failed: continue
-                if filter_option == "❌ 未找到結果" and (is_db_verified or is_web_valid or is_web_failed): continue
-
-                bg_color = "#FEE2E2"
-                if is_db_verified: bg_color = "#D1FAE5"
-                elif is_web_valid: bg_color = "#DBEAFE"
-                elif is_web_failed: bg_color = "#FEF3C7"
+                st.divider()
+                st.markdown("**📜 原始文獻:**")
+                st.markdown(f"<div class='ref-box'>{res['text']}</div>", unsafe_allow_html=True)
                 
-                status_label = f"✅ {found_step}" if is_db_verified else (f"🌐 {found_step}" if is_web_valid else (f"⚠️ {found_step}" if is_web_failed else "❌ 未找到"))
-                
-                p = res.get('parsed', {})
-                with st.expander(f"{res['id']}. {p.get('title', '無標題')[:80]}..."):
-                    st.markdown(f"""<div style="background-color: {bg_color}; padding: 10px; border-radius: 5px; margin-bottom: 15px;"><b>狀態:</b> {status_label}</div>""", unsafe_allow_html=True)
-                    
-                    display_author = p.get('authors') or (f"{p['editor']} (Ed.)" if p.get('editor') else "N/A")
-                    display_title = p.get('title', 'N/A') + (f" {p['edition']}" if p.get('edition') else "")
-                    source_parts = [x for x in [p.get('container-title'), p.get('journal'), f"{p.get('location')}: {p.get('publisher')}" if p.get('publisher') else p.get('publisher')] if x]
-                    display_source = ", ".join(source_parts) if source_parts else "N/A"
-                    
-                    st.markdown(f"""
-                    | | |
-                    | :--- | :--- |
-                    | **👥 作者/編者** | `{display_author}` |
-                    | **📅 發表年份** | `{p.get('date', 'N/A')}` |
-                    | **📰 文獻標題** | `{display_title}` |
-                    | **🏢 出處/發行** | `{display_source}` |
-                    | **🔢 DOI/URL** | `{p.get('doi', p.get('url', 'N/A'))}` |
-                    """)
+                # 融合建議連結 (Suggestion)
+                if res.get("suggestion"):
+                    st.warning("💡 **輸入可能有誤，系統建議：**")
+                    st.markdown(f"系統在模糊搜尋中找到了相似文獻，請確認：\n\n👉 **[點擊查看 Google Scholar 建議結果]({res['suggestion']})**")
+                    st.caption("注意：此項未被正式標記為驗證成功。")
                     st.divider()
-                    st.markdown("**📜 原始文獻:**")
-                    st.markdown(f"<div class='ref-box'>{res['text']}</div>", unsafe_allow_html=True)
-                    
-                    # ▼▼▼▼▼ 新增這段程式碼 ▼▼▼▼▼
-                    if res.get("suggestion"):
-                        st.warning("💡 **輸入可能有誤，系統建議：**")
-                        st.markdown(f"系統在模糊搜尋中找到了相似文獻，請確認您是否是指：\n\n👉 **[點擊查看 Google Scholar 建議結果]({res['suggestion']})**")
-                        st.caption("注意：此文獻因原始輸入標題/格式不精確，未被標記為「驗證成功」。")
-                        st.divider() # 加個分隔線美觀一點
-                    # ▲▲▲▲▲ 新增結束 ▲▲▲▲▲
-                    
-                    if res['sources']:
-                        st.write("**🔗 驗證來源連結：**")
-                        for src, link in res['sources'].items():
-                            if src == "Direct Link": st.markdown(f"- 🌐 **原始網站 (已測試可連線)**: [點擊前往]({link})")
-                            elif src == "Direct Link (Dead)": st.markdown(f"- ⚠️ **原始網站 (連線逾時/失敗，請手動確認)**: [點擊前往]({link})")
-                            elif link.startswith("http"): st.markdown(f"- **{src}**: [點擊開啟]({link})")
-                            else: st.markdown(f"- **{src}**: {link}")
-                    else:
-                        st.error("⚠️ 在所有啟用的資料庫中皆未找到匹配項。")
-                        with st.expander("🔍 查看每個資料庫的詳細失敗原因 (Debug Logs)"):
-                            if res.get("debug_logs"):
-                                for api, msg in res["debug_logs"].items():
-                                    st.write(f"**{api}**: {msg}")
-                            else:
-                                st.write("沒有可用的診斷記錄。")
+                
+                if res['sources']:
+                    st.write("**🔗 驗證來源連結：**")
+                    for src, link in res['sources'].items():
+                        if src == "Direct Link": st.markdown(f"- 🌐 **原始網站 (已測試)**: [點擊前往]({link})")
+                        elif src == "Direct Link (Dead)": st.markdown(f"- ⚠️ **原始網站 (連線失敗)**: [點擊前往]({link})")
+                        elif link.startswith("http"): st.markdown(f"- **{src}**: [點擊開啟]({link})")
+                        else: st.markdown(f"- **{src}**: {link}")
+                else:
+                    st.error("⚠️ 資料庫皆未找到匹配項。")
+                    with st.expander("🔍 查看 Debug Logs"):
+                        for api, msg in res.get("debug_logs", {}).items():
+                            st.write(f"**{api}**: {msg}")
 
 with tab3:
     if st.session_state.results:

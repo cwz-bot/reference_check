@@ -139,19 +139,19 @@ def search_scholar_by_title(title, api_key):
         return None, "No exact match found"
     except Exception as e: return None, str(e)
 
-# def search_scholar_by_ref_text(ref_text, api_key, target_title=None):
-#     if not api_key: return None, "No API Key"
-#     params = {"engine": "google_scholar", "q": ref_text, "api_key": api_key, "num": 1}
-#     try:
-#         results = GoogleSearch(params).get_dict()
-#         organic = results.get("organic_results", [])
-#         if organic:
-#             res_title = organic[0].get("title", "")
-#             if target_title and not _is_match(target_title, res_title):
-#                 return None, "Title mismatch in fallback"
-#             return organic[0].get("link"), "similar"
-#     except: pass
-#     return None, "No results"
+def search_scholar_by_ref_text(ref_text, api_key, target_title=None):
+    if not api_key: return None, "No API Key"
+    params = {"engine": "google_scholar", "q": ref_text, "api_key": api_key, "num": 1}
+    try:
+        results = GoogleSearch(params).get_dict()
+        organic = results.get("organic_results", [])
+        if organic:
+            res_title = organic[0].get("title", "")
+            if target_title and not _is_match(target_title, res_title):
+                return None, "Title mismatch in fallback"
+            return organic[0].get("link"), "similar"
+    except: pass
+    return None, "No results"
 
 # ========== 4. Semantic Scholar & OpenAlex ==========
 
