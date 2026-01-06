@@ -251,6 +251,19 @@ with tab2:
 
     # --- 完整結果展示 ---
     if st.session_state.results:
+        # 計算各項指標
+            total_count = len(st.session_state.results)
+            db_count = sum(1 for r in st.session_state.results if r.get('found_at_step') and "Website" not in r.get('found_at_step'))
+            web_count = sum(1 for r in st.session_state.results if r.get('found_at_step') == "6. Website / Direct URL")
+            fail_count = total_count - db_count - web_count
+
+            # 建立四個欄位顯示統計 (常駐在頁面最上方)
+            st.markdown("### 📊 驗證即時統計")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("總文獻數", total_count)
+            c2.metric("✅ 資料庫成功", db_count, delta_color="normal")
+            c3.metric("🌐 網站來源", web_count, delta_color="normal")
+            c4.metric("❌ 未找到/失敗", fail_count, delta="-"+str(fail_count) if fail_count > 0 else "0")
         st.divider()
         filter_option = st.selectbox("📂 篩選顯示結果", ["全部顯示", "✅ 資料庫驗證", "🌐 網站有效來源", "❌ 未找到結果"])
         
