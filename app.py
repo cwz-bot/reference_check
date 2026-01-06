@@ -267,7 +267,7 @@ with tab2:
             st.divider()
             filter_option = st.selectbox("📂 篩選顯示結果", ["全部顯示", "✅ 資料庫驗證", "🌐 網站有效來源", "❌ 未找到結果"])
         
-        for res in st.session_state.results:
+            for res in st.session_state.results:
             found_step = res.get('found_at_step')
             is_db = found_step and "Website" not in found_step
             is_web = found_step == "6. Website / Direct URL"
