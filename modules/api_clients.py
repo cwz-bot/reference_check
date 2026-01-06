@@ -38,22 +38,21 @@ def _is_match(query, result):
     c_q = clean_title(query)
     c_r = clean_title(result)
     
-    # 第一關：字元相似度
+    # 如果 query 是長原始文字，只要 result (標題) 被完整包含在 query 裡也算中
+    if len(c_q) > len(c_r) * 1.5:
+        if c_r in c_q: return True
+
+    # 原有的比對邏輯
     ratio = SequenceMatcher(None, c_q, c_r).ratio()
+    if ratio >= 0.9: return True # 調低一點點點門檻，增加容錯
     
-    # 第二關：核心關鍵字過濾
+    # 核心單字檢查
     q_words = set(c_q.split())
     r_words = set(c_r.split())
-    # 排除虛詞
-    stop_words = {'a', 'an', 'the', 'of', 'in', 'for', 'with', 'on', 'at', 'by', 'and', 'model', 'based', 'using', 'analysis', 'study'}
+    stop_words = {'a', 'an', 'the', 'of', 'in', 'for', 'with', 'on', 'at', 'by', 'and'}
+    missing_important = [w for w in r_words if w not in stop_words and w not in q_words]
     
-    # 只要 query 裡的核心單字 (如 time, series) 在結果裡不見了，直接判定失敗
-    missing_important = [w for w in q_words if w not in stop_words and w not in r_words]
-    
-    if missing_important:
-        return False
-
-    return ratio >= TITLE_SIMILARITY_THRESHOLD
+    return len(missing_important) == 0
 
 # --- API 呼叫輔助 ---
 def _call_external_api_with_retry(url: str, params: dict, headers=None):
