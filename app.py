@@ -91,23 +91,37 @@ def format_name_field(data):
 def refine_parsed_data(parsed_item):
     item = parsed_item.copy()
     raw_text = item.get('text', '').strip()
+    
+    # 確保所有基礎欄位都是字串，避免 re 報錯
     for key in ['doi', 'url', 'title', 'date']:
-        if item.get(key) and isinstance(item[key], str):
-            item[key] = item[key].strip(' ,.;)]}>')
+        val = item.get(key)
+        if val and isinstance(val, str):
+            item[key] = val.strip(' ,.;)]}>')
+        elif val is not None:
+            item[key] = str(val) # 強制轉字串
+
+    # 標題補救邏輯
     title = item.get('title', '')
     if not title or len(title) < 10:
         abbr_match = re.search(r'^([A-Z0-9\-\.\s]{2,12}:\s*.+?)(?=\s*[,\[]|\s*Available|\s*\(|\bhttps?://|\.|$)', raw_text)
-        if abbr_match: item['title'] = abbr_match.group(1).strip()
+        if abbr_match:
+            item['title'] = abbr_match.group(1).strip()
         else:
             for backup_key in ['publisher', 'container-title', 'journal']:
                 val = item.get(backup_key)
                 if val and len(str(val)) > 15:
                     item['title'] = str(val).strip()
                     break
-    if item.get('url'):
-        doi_match = re.search(r'(10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+)', item['url'])
-        if doi_match: item['doi'] = doi_match.group(1).strip('.')
-    if item.get('authors'): item['authors'] = format_name_field(item['authors'])
+
+    # DOI 提取補救 (安全性修正)
+    current_url = item.get('url')
+    if current_url and isinstance(current_url, str):
+        doi_match = re.search(r'(10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+)', current_url)
+        if doi_match: 
+            item['doi'] = doi_match.group(1).strip('.')
+
+    if item.get('authors'): 
+        item['authors'] = format_name_field(item['authors'])
     return item
 
 # 5. 側邊欄
