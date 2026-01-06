@@ -8,17 +8,8 @@ import tempfile
 import os
 
 # ==============================================================================
-# AnyStyle 解析（雲端/本地兼容版）
+# AnyStyle 解析（雲端/本地兼容優化版）
 # ==============================================================================
-
-# ✅ 修正：不要寫死 C:\...，改為自動偵測
-def get_ruby_cmd():
-    # 優先檢查 Linux 雲端環境的 ruby 位置，如果找不到就回傳 "ruby" 讓系統自行找尋
-    if os.path.exists("/usr/bin/ruby"):
-        return "/usr/bin/ruby"
-    return "ruby"
-
-RUBY_CMD = get_ruby_cmd()
 
 def parse_references_with_anystyle(raw_text_for_anystyle):
     """
@@ -29,34 +20,37 @@ def parse_references_with_anystyle(raw_text_for_anystyle):
     if not raw_text_for_anystyle or not raw_text_for_anystyle.strip():
         return [], []
 
-    # ✅ 修正：不再強制檢查 C:\ 檔案是否存在，而是檢查指令是否可用
+    # 1️⃣ 檢查 anystyle 指令是否可用 (不再透過固定的 Ruby 路徑)
     try:
-        subprocess.run([RUBY_CMD, "--version"], capture_output=True, check=True)
+        # 直接測試 anystyle 指令，因為 app.py 已經幫我們設定好 PATH 了
+        subprocess.run(["anystyle", "--version"], capture_output=True, check=True)
     except Exception:
-        st.error("❌ 系統找不到 Ruby 指令。請確認 packages.txt 內已加入 ruby。")
-        return [], []
+        st.error("❌ 系統找不到 anystyle 指令。正在嘗試備用方案...")
+        # 備用方案：嘗試加上 ruby -S
+        try:
+            subprocess.run(["ruby", "-S", "anystyle", "--version"], capture_output=True, check=True)
+            ANYSTYLE_CMD = ["ruby", "-S", "anystyle"]
+        except:
+            st.error("❌ 仍無法啟動 AnyStyle。請確保 Reboot App 或檢查 packages.txt。")
+            return [], []
+    else:
+        ANYSTYLE_CMD = ["anystyle"]
 
-    # 2️⃣ 將輸入文字按行拆分，過濾掉空行
+    # 2️⃣ 將輸入文字按行拆分
     lines = [line.strip() for line in raw_text_for_anystyle.split('\n') if line.strip()]
     
     structured_refs = []
     raw_texts = []
 
-    # 建立進度條
     progress_bar = st.progress(0)
     total_lines = len(lines)
 
     for i, line in enumerate(lines):
-        # 3️⃣ 針對單行文獻進行語言判定
         has_chinese = bool(re.search(r'[\u4e00-\u9fff]', line))
 
-        # 4️⃣ 為單行文獻建立暫存檔
         try:
             with tempfile.NamedTemporaryFile(
-                mode="w",
-                suffix=".txt",
-                delete=False,
-                encoding="utf-8"
+                mode="w", suffix=".txt", delete=False, encoding="utf-8"
             ) as tmp:
                 tmp.write(line)
                 tmp_path = tmp.name
@@ -64,19 +58,13 @@ def parse_references_with_anystyle(raw_text_for_anystyle):
             st.error(f"❌ 無法建立暫存檔：{e}")
             continue
 
-        # 5️⃣ 組合指令：改用 RUBY_CMD
-        command = [
-            RUBY_CMD,
-            "-S",
-            "anystyle",
-            "-f", "json",
-            "parse"
-        ]
+        # 3️⃣ 組合指令：直接使用偵測到的 ANYSTYLE_CMD
+        command = ANYSTYLE_CMD + ["-f", "json", "parse"]
 
         # 如果有 custom.mod 且是中文文獻才加入參數
         if has_chinese and os.path.exists("custom.mod"):
-            command.insert(3, "-P")
-            command.insert(4, "custom.mod")
+            command.insert(len(ANYSTYLE_CMD), "-P")
+            command.insert(len(ANYSTYLE_CMD) + 1, "custom.mod")
         
         command.append(tmp_path)
 
@@ -101,7 +89,6 @@ def parse_references_with_anystyle(raw_text_for_anystyle):
 
             for item in line_data:
                 cleaned_item = {}
-                # 格式化欄位內容
                 for key, value in item.items():
                     if isinstance(value, list):
                         if key == "author":
@@ -129,7 +116,7 @@ def parse_references_with_anystyle(raw_text_for_anystyle):
         finally:
             try:
                 os.remove(tmp_path)
-            except Exception:
+            except:
                 pass
         
         progress_bar.progress((i + 1) / total_lines)
@@ -168,3 +155,4 @@ def clean_title_for_remedial(text):
         if unicodedata.category(ch)[0] in ("L", "N", "Z")
     ]
     return re.sub(r"\s+", " ", "".join(cleaned)).strip()
+
