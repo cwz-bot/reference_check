@@ -8,11 +8,17 @@ import tempfile
 import os
 
 # ==============================================================================
-# AnyStyle 解析（語系自動偵測逐行模型切換版）
+# AnyStyle 解析（雲端/本地兼容版）
 # ==============================================================================
 
-# 🔴 請確保此路徑與你電腦中的 ruby.exe 位置一致
-RUBY_EXE = r"C:\Ruby34-x64\bin\ruby.exe"
+# ✅ 修正：不要寫死 C:\...，改為自動偵測
+def get_ruby_cmd():
+    # 優先檢查 Linux 雲端環境的 ruby 位置，如果找不到就回傳 "ruby" 讓系統自行找尋
+    if os.path.exists("/usr/bin/ruby"):
+        return "/usr/bin/ruby"
+    return "ruby"
+
+RUBY_CMD = get_ruby_cmd()
 
 def parse_references_with_anystyle(raw_text_for_anystyle):
     """
@@ -23,9 +29,11 @@ def parse_references_with_anystyle(raw_text_for_anystyle):
     if not raw_text_for_anystyle or not raw_text_for_anystyle.strip():
         return [], []
 
-    # 1️⃣ 確認 ruby.exe 存在
-    if not os.path.exists(RUBY_EXE):
-        st.error(f"❌ 找不到 ruby.exe：{RUBY_EXE}")
+    # ✅ 修正：不再強制檢查 C:\ 檔案是否存在，而是檢查指令是否可用
+    try:
+        subprocess.run([RUBY_CMD, "--version"], capture_output=True, check=True)
+    except Exception:
+        st.error("❌ 系統找不到 Ruby 指令。請確認 packages.txt 內已加入 ruby。")
         return [], []
 
     # 2️⃣ 將輸入文字按行拆分，過濾掉空行
@@ -56,17 +64,17 @@ def parse_references_with_anystyle(raw_text_for_anystyle):
             st.error(f"❌ 無法建立暫存檔：{e}")
             continue
 
-        # 5️⃣ 組合指令：根據單行內容動態切換模型
+        # 5️⃣ 組合指令：改用 RUBY_CMD
         command = [
-            RUBY_EXE,
+            RUBY_CMD,
             "-S",
             "anystyle",
             "-f", "json",
             "parse"
         ]
 
-        if has_chinese:
-            # 偵測到中文：插入自定義模型參數
+        # 如果有 custom.mod 且是中文文獻才加入參數
+        if has_chinese and os.path.exists("custom.mod"):
             command.insert(3, "-P")
             command.insert(4, "custom.mod")
         
@@ -90,11 +98,9 @@ def parse_references_with_anystyle(raw_text_for_anystyle):
                     stdout = match.group(0)
 
             line_data = json.loads(stdout)
-            print(line_data)
 
             for item in line_data:
                 cleaned_item = {}
-
                 # 格式化欄位內容
                 for key, value in item.items():
                     if isinstance(value, list):
@@ -112,7 +118,6 @@ def parse_references_with_anystyle(raw_text_for_anystyle):
                     else:
                         cleaned_item[key] = value
 
-                # 建立 fallback 原始文字預覽（確保 app.py 搜尋時有 text 欄位）
                 if "text" not in cleaned_item:
                     cleaned_item["text"] = line
 
@@ -120,20 +125,16 @@ def parse_references_with_anystyle(raw_text_for_anystyle):
                 raw_texts.append(cleaned_item["text"])
 
         except Exception as e:
-            # 發生錯誤時記錄該行但繼續執行
             st.error(f"解析第 {i+1} 行時發生錯誤：{e}")
         finally:
-            # 刪除暫存檔
             try:
                 os.remove(tmp_path)
             except Exception:
                 pass
         
-        # 更新進度
         progress_bar.progress((i + 1) / total_lines)
 
     return raw_texts, structured_refs
-
 
 # ==============================================================================
 # 標題清洗函式
