@@ -136,16 +136,25 @@ tab1, tab2, tab3 = st.tabs(["📝 輸入解析", "🔍 驗證結果", "📊 統�
 with tab1:
     raw_input = st.text_area("在此輸入文獻內容...", height=300, placeholder="貼上 References...")
     if st.button("🚀 開始解析", type="primary"):
-        if not raw_input: st.warning("請輸入文字")
+        if not raw_input: 
+            st.warning("請先輸入文獻內容")
         else:
+            # 清空舊結果
             st.session_state.structured_references = []
             st.session_state.results = []
-            with st.spinner("AnyStyle 解析中..."):
-                _, struct_list = parse_references_with_anystyle(raw_input)
+            
+            with st.spinner("正在解析文獻結構..."):
+                # 這裡最關鍵：必須接收兩個值 (raw_texts, struct_list)
+                raw_list, struct_list = parse_references_with_anystyle(raw_input)
+                
                 if struct_list:
                     st.session_state.structured_references = struct_list
-                    st.success(f"✅ 解析成功！共 {len(struct_list)} 筆。")
-                    st.rerun()
+                    st.success(f"✅ 解析完成，共 {len(struct_list)} 筆！請切換至「驗證結果」頁籤。")
+                    # 強制頁面更新，這樣 Tab2 才會看到資料
+                    time.sleep(1)
+                    st.rerun() 
+                else:
+                    st.error("解析失敗，請確認 Log 或輸入格式。")
 
 with tab2:
     if not st.session_state.structured_references:
