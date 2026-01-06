@@ -9,15 +9,32 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 1. 雲端環境自動修復
+# app.py 開頭的修復補丁
+
 def ensure_anystyle_installed():
+    # 1. 定義可能出現的路徑 (針對 Streamlit Cloud 的 Linux 環境)
+    possible_paths = [
+        "/home/appuser/.local/share/gem/ruby/3.1.0/bin",
+        "/home/adminuser/.local/share/gem/ruby/3.1.0/bin",
+        subprocess.getoutput("ruby -e 'print Gem.user_dir'") + "/bin"
+    ]
+    
+    # 2. 將這些路徑加入系統環境變數 PATH
+    for p in possible_paths:
+        if p not in os.environ["PATH"]:
+            os.environ["PATH"] = p + os.pathsep + os.environ["PATH"]
+
+    # 3. 測試是否能執行
     try:
-        subprocess.run(["ruby", "-S", "anystyle", "--version"], capture_output=True, check=True)
+        subprocess.run(["anystyle", "--version"], capture_output=True, check=True)
     except:
         with st.spinner("☁️ 正在初始化雲端 AnyStyle 環境..."):
+            # 如果還是找不到，嘗試再次安裝 (加上 --user-install 確保權限)
             os.system("gem install anystyle-cli --user-install")
-            user_gem_path = subprocess.getoutput("ruby -e 'print Gem.user_dir'") + "/bin"
-            if user_gem_path not in os.environ["PATH"]:
-                os.environ["PATH"] += os.pathsep + user_gem_path
+            # 再次刷新路徑
+            new_path = subprocess.getoutput("ruby -e 'print Gem.user_dir'") + "/bin"
+            if new_path not in os.environ["PATH"]:
+                os.environ["PATH"] = new_path + os.pathsep + os.environ["PATH"]
 
 ensure_anystyle_installed()
 
