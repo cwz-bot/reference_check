@@ -202,7 +202,7 @@ with tab2:
                         res["found_at_step"] = "0. Local Database"
                         return res
 
-                # Step 1: Crossref / Scopus / OpenAlex ... (併發調用)
+                # Step 1: Crossref / Scopus ...
                 if doi:
                     _, url, _ = search_crossref_by_doi(doi, target_title=title if title else None)
                     if url:
@@ -210,7 +210,6 @@ with tab2:
                         res["found_at_step"] = "1. Crossref (DOI)"
                         return res
                 
-                # 依序查找各 API
                 for api_func, step_name in [
                     (lambda: search_crossref_by_text(search_query, first_author), "1. Crossref"),
                     (lambda: search_scopus_by_title(search_query, scopus_key) if scopus_key else (None, "No Key"), "2. Scopus"),
@@ -249,65 +248,66 @@ with tab2:
             st.session_state.results = sorted(results_buffer, key=lambda x: x['id'])
             st.rerun()
 
-    # --- 完整結果展示 ---
-    if st.session_state.results:
-        # 計算各項指標
+        # --- 完整結果展示 (修正縮進錯誤區) ---
+        if st.session_state.results:
+            # 1. 計算數據
             total_count = len(st.session_state.results)
             db_count = sum(1 for r in st.session_state.results if r.get('found_at_step') and "Website" not in r.get('found_at_step'))
             web_count = sum(1 for r in st.session_state.results if r.get('found_at_step') == "6. Website / Direct URL")
             fail_count = total_count - db_count - web_count
 
-            # 建立四個欄位顯示統計 (常駐在頁面最上方)
+            # 2. 顯示統計
             st.markdown("### 📊 驗證即時統計")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("總文獻數", total_count)
-            c2.metric("✅ 資料庫成功", db_count, delta_color="normal")
-            c3.metric("🌐 網站來源", web_count, delta_color="normal")
-            c4.metric("❌ 未找到/失敗", fail_count, delta="-"+str(fail_count) if fail_count > 0 else "0")
+            c2.metric("✅ 資料庫成功", db_count)
+            c3.metric("🌐 網站來源", web_count)
+            c4.metric("❌ 未找到", fail_count, delta="-"+str(fail_count) if fail_count > 0 else None)
+            
             st.divider()
             filter_option = st.selectbox("📂 篩選顯示結果", ["全部顯示", "✅ 資料庫驗證", "🌐 網站有效來源", "❌ 未找到結果"])
-        
+            
+            # 3. 循環顯示文獻結果 (此處縮進已對齊)
             for res in st.session_state.results:
-            found_step = res.get('found_at_step')
-            is_db = found_step and "Website" not in found_step
-            is_web = found_step == "6. Website / Direct URL"
-            is_fail = found_step == "6. Website (Link Failed)"
+                found_step = res.get('found_at_step')
+                is_db = found_step and "Website" not in found_step
+                is_web = found_step == "6. Website / Direct URL"
+                is_fail = found_step == "6. Website (Link Failed)"
 
-            if filter_option == "✅ 資料庫驗證" and not is_db: continue
-            if filter_option == "🌐 網站有效來源" and not is_web: continue
-            if filter_option == "❌ 未找到結果" and (is_db or is_web or is_fail): continue
+                if filter_option == "✅ 資料庫驗證" and not is_db: continue
+                if filter_option == "🌐 網站有效來源" and not is_web: continue
+                if filter_option == "❌ 未找到結果" and (is_db or is_web or is_fail): continue
 
-            bg = "#D1FAE5" if is_db else ("#DBEAFE" if is_web else ("#FEF3C7" if is_fail else "#FEE2E2"))
-            label = f"✅ {found_step}" if is_db else (f"🌐 {found_step}" if is_web else (f"⚠️ {found_step}" if is_fail else "❌ 未找到"))
-            p = res.get('parsed', {})
+                bg = "#D1FAE5" if is_db else ("#DBEAFE" if is_web else ("#FEF3C7" if is_fail else "#FEE2E2"))
+                label = f"✅ {found_step}" if is_db else (f"🌐 {found_step}" if is_web else (f"⚠️ {found_step}" if is_fail else "❌ 未找到"))
+                p = res.get('parsed', {})
 
-            with st.expander(f"{res['id']}. {p.get('title', '無標題')[:80]}..."):
-                st.markdown(f'<div style="background:{bg}; padding:10px; border-radius:5px; margin-bottom:10px;"><b>狀態:</b> {label}</div>', unsafe_allow_html=True)
-                
-                # 補回詳細表格資訊
-                st.markdown(f"""
-                | | |
-                | :--- | :--- |
-                | **👥 作者/編者** | `{p.get('authors', 'N/A')}` |
-                | **📅 發表年份** | `{p.get('date', 'N/A')}` |
-                | **📰 文獻標題** | `{p.get('title', 'N/A')}` |
-                | **🏢 出處/發行** | `{p.get('journal', p.get('publisher', 'N/A'))}` |
-                """)
-                
-                st.markdown("**📜 原始文獻:**")
-                st.markdown(f"<div class='ref-box'>{res['text']}</div>", unsafe_allow_html=True)
-                
-                if res.get("suggestion"):
-                    st.warning(f"💡 [建議結果 (Google Scholar)]({res['suggestion']})")
+                with st.expander(f"{res['id']}. {p.get('title', '無標題')[:80]}..."):
+                    st.markdown(f'<div style="background:{bg}; padding:10px; border-radius:5px; margin-bottom:10px;"><b>狀態:</b> {label}</div>', unsafe_allow_html=True)
+                    
+                    st.markdown(f"""
+                    | | |
+                    | :--- | :--- |
+                    | **👥 作者/編者** | `{p.get('authors', 'N/A')}` |
+                    | **📅 發表年份** | `{p.get('date', 'N/A')}` |
+                    | **📰 文獻標題** | `{p.get('title', 'N/A')}` |
+                    | **🏢 出處/發行** | `{p.get('journal', p.get('publisher', 'N/A'))}` |
+                    """)
+                    
+                    st.markdown("**📜 原始文獻:**")
+                    st.markdown(f"<div class='ref-box'>{res['text']}</div>", unsafe_allow_html=True)
+                    
+                    if res.get("suggestion"):
+                        st.warning(f"💡 [建議結果 (Google Scholar)]({res['suggestion']})")
 
-                if res['sources']:
-                    st.write("**🔗 驗證連結：**")
-                    for src, link in res['sources'].items():
-                        st.write(f"- {src}: [{link}]({link})")
-                else:
-                    with st.expander("🔍 查看 Debug Logs"):
-                        for api, msg in res.get("debug_logs", {}).items():
-                            st.write(f"**{api}**: {msg}")
+                    if res['sources']:
+                        st.write("**🔗 驗證連結：**")
+                        for src, link in res['sources'].items():
+                            st.write(f"- {src}: [{link}]({link})")
+                    else:
+                        with st.expander("🔍 查看 Debug Logs"):
+                            for api, msg in res.get("debug_logs", {}).items():
+                                st.write(f"**{api}**: {msg}")
 
 with tab3:
     if st.session_state.results:
