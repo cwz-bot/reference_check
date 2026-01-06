@@ -265,7 +265,7 @@ with tab2:
             c3.metric("🌐 網站來源", web_count, delta_color="normal")
             c4.metric("❌ 未找到/失敗", fail_count, delta="-"+str(fail_count) if fail_count > 0 else "0")
             st.divider()
-        filter_option = st.selectbox("📂 篩選顯示結果", ["全部顯示", "✅ 資料庫驗證", "🌐 網站有效來源", "❌ 未找到結果"])
+            filter_option = st.selectbox("📂 篩選顯示結果", ["全部顯示", "✅ 資料庫驗證", "🌐 網站有效來源", "❌ 未找到結果"])
         
         for res in st.session_state.results:
             found_step = res.get('found_at_step')
